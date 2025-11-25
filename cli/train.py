@@ -16,6 +16,8 @@
 from functools import partial
 from typing import Callable, Optional
 
+import numpy as np
+
 import hydra
 import lightning as L
 import torch
@@ -119,6 +121,58 @@ class DataModule(L.LightningDataModule):
             return None
 
 
+def _infer_target_dim(sample: dict) -> Optional[int]:
+    target = sample.get("target")
+    if target is None:
+        return None
+
+    if isinstance(target, np.ndarray):
+        return 1 if target.ndim == 1 else target.shape[0]
+
+    if isinstance(target, list) and target and isinstance(target[0], np.ndarray):
+        # Flattened multivariate targets arrive as a list of univariates.
+        return len(target)
+
+    return None
+
+
+def _get_first_sample(dataset: Dataset) -> dict:
+    if hasattr(dataset, "indexer"):
+        try:
+            return dataset.indexer[0]
+        except Exception:
+            pass
+
+    if hasattr(dataset, "datasets") and getattr(dataset, "datasets"):
+        return _get_first_sample(dataset.datasets[0])
+
+    return dataset[0]
+
+
+def _validate_dataset_dimensions(
+    dataset: Dataset,
+    expected_target_dim: Optional[int],
+    expected_feat_static_cat_dim: Optional[int],
+):
+    sample = _get_first_sample(dataset)
+
+    if expected_target_dim is not None:
+        observed_dim = _infer_target_dim(sample)
+        if observed_dim is not None and observed_dim != expected_target_dim:
+            raise ValueError(
+                f"target_dim mismatch: expected {expected_target_dim}, got {observed_dim}"
+            )
+
+    if expected_feat_static_cat_dim is not None and "feat_static_cat" in sample:
+        feat_static_cat = sample.get("feat_static_cat")
+        observed_dim = None if feat_static_cat is None else len(feat_static_cat)
+        if observed_dim is not None and observed_dim != expected_feat_static_cat_dim:
+            raise ValueError(
+                "feat_static_cat dimension mismatch: expected "
+                f"{expected_feat_static_cat_dim}, got {observed_dim}"
+            )
+
+
 @hydra.main(version_base="1.3", config_name="default.yaml")
 def main(cfg: DictConfig):
     if cfg.tf32:
@@ -150,6 +204,13 @@ def main(cfg: DictConfig):
         )
         if "val_data" in cfg
         else None
+    )
+
+    validation_cfg = cfg.get("data_validation", {})
+    _validate_dataset_dimensions(
+        train_dataset,
+        validation_cfg.get("target_dim"),
+        validation_cfg.get("feat_static_cat_dim"),
     )
     L.seed_everything(cfg.seed + trainer.logger.version, workers=True)
 

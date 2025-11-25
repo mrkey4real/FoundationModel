@@ -12,6 +12,9 @@ seed: 0
 tf32: true
 compile: false  # set to mode: default, reduce-overhead, max-autotune
 ckpt_path: null
+data_validation:
+  target_dim: null
+  feat_static_cat_dim: null
 trainer:
   _target_: lightning.Trainer
   accelerator: auto
