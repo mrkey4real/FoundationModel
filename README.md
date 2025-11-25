@@ -169,8 +169,66 @@ plt.show()
 See the [example folder](example) for more examples on common tasks, e.g. visualizing forecasts, predicting from pandas DataFrame, etc.
 
 ## 💻 Command Line Interface
-We provide several scripts which act as a [command line interface](cli) to easily run fine-tuning, evaluation, and even pre-training jobs. 
+We provide several scripts which act as a [command line interface](cli) to easily run fine-tuning, evaluation, and even pre-training jobs.
 [Configurations](cli/conf) are managed with the [Hydra](https://hydra.cc/) framework.
+
+## 🔧 HVAC/BuildingFM 快速开始
+
+以下流程复用 `CLAUDE.md` 中的格式约束，并给出最小可运行示例，便于将 HVAC/BuildingFM 数据快速对接到 `project/moirai-1` 或 `project/moirai-moe-1` 的配置。
+
+### 数据格式要求（与 `CLAUDE.md` 一致）
+
+* 每条样本是一个字典，包含 `start: pd.Timestamp`、`freq: pandas offset string`、`target: np.ndarray` 等键；`target` 的形状必须是 `(num_variates, time_steps)`（单变量也写成 `(1, T)`）。【F:CLAUDE.md†L70-L96】
+* 所有可观测变量都放入 `target` 以获得 Variate ID Embedding 和随机掩码能力（不将天气等特征放 `feat_dynamic_real`）。【F:CLAUDE.md†L26-L48】
+* 如果使用 `feat_static_cat` 存放系统类型、建筑类型或气候区，请保证所有样本维度一致，缺失时使用统一的“unknown”编码。【F:CLAUDE.md†L118-L133】
+* `target_dim` 应等于 Super Schema 中的变量数量；列顺序需与 Super Schema 保持一致，确保 Variate ID 对齐。
+
+### 最小可运行示例
+
+1. **数据预处理与 Arrow 生成**
+   ```bash
+   # 1) EnergyPlus CSV → 按 Super Schema 重命名 & 生成 Parquet
+   python scripts/map_energyplus_to_schema.py \
+     data/raw/eplus.csv config/hvac_schema.yaml data/processed/hvac.parquet
+
+   # 2) Parquet → Hugging Face Arrow，多变量宽表符合 (num_variates, time_steps)
+   python -m uni2ts.data.builder.simple HVAC \
+     data/processed/hvac.parquet \
+     --dataset_type wide_multivariate --freq 15T \
+     --storage_path data/arrow/hvac_demo
+   ```
+
+2. **单 GPU 小样本验证（Moirai，参考 `project/moirai-1`）**
+   ```bash
+   python -m cli.train -cp cli/conf/finetune -cn default \
+     exp_name=HVAC run_name=debug_moirai \
+     model=moirai_1.1_R_small data=etth1 \
+     data.dataset=HVAC data.train_path=data/arrow/hvac_demo \
+     data.prediction_length=96 data.context_length=512 data.patch_size=16 \
+     trainer.devices=1 trainer.max_epochs=1 \
+     train_dataloader.batch_size=4 val_dataloader.batch_size=4
+   ```
+
+3. **推理/评估（支持 Moirai 与 Moirai-MoE）**
+   ```bash
+   # Moirai-1.1-R（project/moirai-1）
+   python -m cli.eval -cp cli/conf/eval -cn default \
+     run_name=hvac_eval model=moirai_1.1_R_small data=monash \
+     data.dataset_name=HVAC data.path=data/arrow/hvac_demo \
+     data.prediction_length=96 model.context_length=512 model.patch_size=16 \
+     model.target_dim=50 model.feat_static_cat_dim=3
+
+   # Moirai-MoE-1.0-R（project/moirai-moe-1）
+   python -m cli.eval -cp cli/conf/eval -cn default \
+     run_name=hvac_moe_eval model=moirai_moe_1.0_R_small data=monash \
+     data.dataset_name=HVAC data.path=data/arrow/hvac_demo \
+     data.prediction_length=96 model.context_length=512 model.patch_size=16 \
+     model.target_dim=50 model.feat_static_cat_dim=3
+   ```
+
+### 变量 ID 与 schema 同步
+
+在所有数据源之间保持 `target` 列顺序与 Super Schema 一致，并且新增变量只能追加 ID，避免破坏已有 embedding 的语义。更多细节参见 [CLAUDE.md](CLAUDE.md#22-super-schema-全集变量图谱)。【F:CLAUDE.md†L51-L117】
 
 ### Fine-tuning
 Firstly, let's see how to use Uni2TS to fine-tune a pre-trained model on your custom dataset. 
