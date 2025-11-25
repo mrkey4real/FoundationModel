@@ -35,6 +35,25 @@ def main(cfg: DictConfig):
     pd.options.display.float_format = "{:.3f}".format
 
     test_data, metadata = call(cfg.data)
+    validation_cfg = cfg.get("data_validation", {})
+    if validation_cfg.get("target_dim") is not None:
+        assert (
+            metadata.target_dim == validation_cfg.target_dim
+        ), f"target_dim mismatch: {metadata.target_dim} vs {validation_cfg.target_dim}"
+
+    expected_feat_static_cat_dim = validation_cfg.get("feat_static_cat_dim")
+    if expected_feat_static_cat_dim is not None and hasattr(metadata, "feat_static_cat"):
+        observed_feat_static_cat_dim = None
+        if metadata.feat_static_cat is not None:
+            observed_feat_static_cat_dim = len(metadata.feat_static_cat)
+        if (
+            observed_feat_static_cat_dim is not None
+            and observed_feat_static_cat_dim != expected_feat_static_cat_dim
+        ):
+            raise ValueError(
+                "feat_static_cat_dim mismatch: "
+                f"{observed_feat_static_cat_dim} vs {expected_feat_static_cat_dim}"
+            )
     batch_size = cfg.batch_size
     while True:
         model = call(cfg.model, _partial_=True, _convert_="all")(

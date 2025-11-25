@@ -6,6 +6,9 @@ defaults:
   - data: ???
   - _self_
 run_name: ???
+data_validation:
+  target_dim: null
+  feat_static_cat_dim: null
 metrics:
   - _target_: gluonts.ev.metrics.MSE
   - _target_: uni2ts.eval_util.metrics.MedianMSE
