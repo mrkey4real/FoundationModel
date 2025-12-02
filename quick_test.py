@@ -28,21 +28,27 @@ from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
 
 MODEL = "moirai2"  # model name: choose from {'moirai', 'moirai-moe', 'moirai2'}
 SIZE = "small"  # model size: choose from {'small', 'base', 'large'}
-PDT = 20  # prediction length: any positive integer
-CTX = 200  # context length: any positive integer
+PDT = 200  # prediction length: any positive integer
+CTX = 400  # context length: any positive integer
 PSZ = "auto"  # patch size: choose from {"auto", 8, 16, 32, 64, 128}
 BSZ = 32  # batch size: any positive integer
-TEST = 100  # test set length: any positive integer
+TEST = 200  # test set length: any positive integer
 
 # Read data into pandas DataFrame
-url = (
-    "https://gist.githubusercontent.com/rsnirwan/c8c8654a98350fadd229b00167174ec4"
-    "/raw/a42101c7786d4bc7695228a0f2c8cea41340e18f/ts_wide.csv"
-)
-df = pd.read_csv(url, index_col=0, parse_dates=True)
+df = pd.read_csv("./data/merged_labview_egauge.csv", index_col="timestamp", parse_dates=True)
+
+# 选择要预测的目标列（可以改成你想预测的任意列名）
+TARGET_COLUMN = "labview_Thermostat"
+
+# 只保留目标列，并去除NaN值
+df = df[[TARGET_COLUMN]].dropna()
+
+# 确保时间索引排序，并设置频率为15分钟
+df = df.sort_index()
+df = df.asfreq("15min")
 
 # Convert into GluonTS dataset
-ds = PandasDataset(dict(df))
+ds = PandasDataset(dict(df), freq="15min")
 
 # Split into train/test set
 train, test_template = split(
@@ -107,7 +113,7 @@ plot_single(
     inp, 
     label, 
     forecast, 
-    context_length=200,
+    context_length=CTX,
     name="pred",
     show_label=True,
 )

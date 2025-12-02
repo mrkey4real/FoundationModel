@@ -1,11 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-模型公平对比脚本
-对比 moirai, moirai-moe, moirai2 的预测性能
-
-作者: Claude Code
-日期: 2025-12-01
-"""
 
 import torch
 import matplotlib.pyplot as plt
