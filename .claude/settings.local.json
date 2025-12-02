@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python model_comparison.py:*)",
+      "Bash(conda activate:*)",
+      "Bash(where:*)",
+      "Bash(conda run:*)",
+      "Bash(conda env:*)",
+      "Bash(C:ProgramDataanaconda3envsfmpython.exe model_comparison.py)",
+      "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\" model_comparison.py)",
+      "Bash(dir:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

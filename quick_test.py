@@ -17,7 +17,16 @@ from uni2ts.model.moirai import MoiraiForecast, MoiraiModule
 from uni2ts.model.moirai_moe import MoiraiMoEForecast, MoiraiMoEModule
 from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
 
-MODEL = "moirai"  # model name: choose from {'moirai', 'moirai-moe', 'moirai2'}
+# ========== 公平对比配置 ==========
+# 为了公平对比不同模型，所有模型应使用相同的参数：
+# - prediction_length (PDT): 预测的时间步数
+# - context_length (CTX): 用于预测的历史长度
+# - patch_size (PSZ): 每个patch包含的时间步数
+# - batch_size (BSZ): 批次大小
+# - num_samples: 概率预测的采样次数（已统一为100）
+# ===================================
+
+MODEL = "moirai2"  # model name: choose from {'moirai', 'moirai-moe', 'moirai2'}
 SIZE = "small"  # model size: choose from {'small', 'base', 'large'}
 PDT = 20  # prediction length: any positive integer
 CTX = 200  # context length: any positive integer
@@ -64,23 +73,23 @@ elif MODEL == "moirai-moe":
         module=MoiraiMoEModule.from_pretrained(f"Salesforce/moirai-moe-1.0-R-{SIZE}"),
         prediction_length=PDT,
         context_length=CTX,
-        patch_size=16,
+        patch_size=PSZ,  # 使用统一的 PSZ 参数
         num_samples=100,
         target_dim=1,
         feat_dynamic_real_dim=ds.num_feat_dynamic_real,
         past_feat_dynamic_real_dim=ds.num_past_feat_dynamic_real,
     )
-    
+
 elif MODEL == "moirai2":
     model = Moirai2Forecast(
         module=Moirai2Module.from_pretrained(
-            f"Salesforce/moirai-2.0-R-small",
+            f"Salesforce/moirai-2.0-R-{SIZE}",  # 使用 SIZE 变量
         ),
-        prediction_length=100,
-        context_length=1680,
+        prediction_length=PDT,  # 使用统一的 PDT 参数
+        context_length=CTX,     # 使用统一的 CTX 参数
         target_dim=1,
-        feat_dynamic_real_dim=0,
-        past_feat_dynamic_real_dim=0,
+        feat_dynamic_real_dim=ds.num_feat_dynamic_real,
+        past_feat_dynamic_real_dim=ds.num_past_feat_dynamic_real,
     )
 
 predictor = model.create_predictor(batch_size=BSZ)
