@@ -1,5 +1,20 @@
 # BuildingFM 技术实现指南 (v2)
 
+## 开发环境
+
+**Python 环境**: `C:\ProgramData\anaconda3\envs\fm`
+
+运行代码时请使用此 conda 环境：
+```bash
+# 激活环境
+conda activate fm
+
+# 或者直接使用完整路径
+C:\ProgramData\anaconda3\envs\fm\python.exe your_script.py
+```
+
+---
+
 ## 项目目标
 
 基于 Salesforce uni2ts/MOIRAI 架构，构建 HVAC 领域物理感知基座模型。
