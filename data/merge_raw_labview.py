@@ -8,7 +8,7 @@ Created on Tue Dec  2 13:47:13 2025
 import pandas as pd
 from pathlib import Path
 
-target_house = 'East'
+target_house = 'West'
 YEAR = 2025
 file_name = f"{target_house}_{YEAR}_csv"
 

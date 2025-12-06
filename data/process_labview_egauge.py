@@ -9,14 +9,15 @@ import pandas as pd
 from pathlib import Path
 
 # ============== Configuration ==============
-egauge_path = Path("./east_egauge_2025-1-1_2025-12-1_15min.csv")
-labview_path = Path("./merged_east_labview.csv")
-output_path = Path("./merged_labview_egauge.csv")
+target_house = "East"
+egauge_path = Path("./east_egauge_2025-1-1_2025-12-1_1min.csv")
+labview_path = Path(f"./merged_{target_house}_labview.csv")
 
 start_time = "2025-01-01 00:00:00"
 end_time = "2025-12-01 00:00:00"
-resample_interval = "5min"  # 1min, 5min, 15min, 1h, etc.
+resample_interval = "1min"  # 1min, 5min, 15min, 1h, etc.
 
+output_path = Path(f"./merged_{target_house}_labview_egauge_{resample_interval}.csv")
 
 def normalize_to_1min(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
     """

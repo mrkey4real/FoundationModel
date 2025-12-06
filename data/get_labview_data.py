@@ -15,13 +15,13 @@ REPO = "TAM-SCHT"
 BRANCH = "main"
 TARGET_PATH = "Data/Testing"  # 只递归这个目录
 
-target_house = 'East'
-year = 2024
+target_house = 'West'
+year = 2025
 # ==================================
 
 headers = {"Authorization": f"token {TOKEN}"}
 
-file_name = f"{target_house}_{year}_csv"
+file_name = f"{target_house}_{year}_Labview"
 os.makedirs(f"{file_name}", exist_ok=True)
 
 def fetch_files(path):
