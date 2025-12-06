@@ -45,10 +45,10 @@ df = df[[TARGET_COLUMN]].dropna()
 
 # 确保时间索引排序，并设置频率为15分钟
 df = df.sort_index()
-df = df.asfreq("15min")
+df = df.asfreq("5min")
 
 # Convert into GluonTS dataset
-ds = PandasDataset(dict(df), freq="15min")
+ds = PandasDataset(dict(df), freq="5min")
 
 # Split into train/test set
 train, test_template = split(

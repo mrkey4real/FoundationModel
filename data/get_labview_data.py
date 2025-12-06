@@ -16,7 +16,7 @@ BRANCH = "main"
 TARGET_PATH = "Data/Testing"  # 只递归这个目录
 
 target_house = 'East'
-year = 2025
+year = 2024
 # ==================================
 
 headers = {"Authorization": f"token {TOKEN}"}
