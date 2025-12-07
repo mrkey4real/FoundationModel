@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Created on Mon Dec  1 12:59:28 2025
-
 @author: qizixuan
 """
 
@@ -28,14 +27,14 @@ from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
 
 MODEL = "moirai2"  # model name: choose from {'moirai', 'moirai-moe', 'moirai2'}
 SIZE = "small"  # model size: choose from {'small', 'base', 'large'}
-PDT = 200  # prediction length: any positive integer
+PDT = 360  # prediction length: any positive integer
 CTX = 400  # context length: any positive integer
 PSZ = "auto"  # patch size: choose from {"auto", 8, 16, 32, 64, 128}
 BSZ = 32  # batch size: any positive integer
-TEST = 200  # test set length: any positive integer
+TEST = 360  # test set length: any positive integer
 
 # Read data into pandas DataFrame
-df = pd.read_csv("./data/merged_labview_egauge.csv", index_col="timestamp", parse_dates=True)
+df = pd.read_csv("./data/merged_East_labview_egauge_1min.csv", index_col="timestamp", parse_dates=True)
 
 # 选择要预测的目标列（可以改成你想预测的任意列名）
 TARGET_COLUMN = "labview_Thermostat"
@@ -45,10 +44,10 @@ df = df[[TARGET_COLUMN]].dropna()
 
 # 确保时间索引排序，并设置频率为15分钟
 df = df.sort_index()
-df = df.asfreq("5min")
+df = df.asfreq("1min")
 
 # Convert into GluonTS dataset
-ds = PandasDataset(dict(df), freq="5min")
+ds = PandasDataset(dict(df), freq="1min")
 
 # Split into train/test set
 train, test_template = split(

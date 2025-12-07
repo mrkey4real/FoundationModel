@@ -8,14 +8,15 @@ Created on Tue Dec  2 13:47:13 2025
 import pandas as pd
 from pathlib import Path
 
-target_house = 'West'
+target_house = 'East'
+source = "labview"
 YEAR = 2025
-file_name = f"{target_house}_{YEAR}_csv"
+file_name = f"{target_house}_{YEAR}_{source}"
 
 # Configuration
 SCRIPT_DIR = Path(__file__).resolve().parent
 RAW_DIR = SCRIPT_DIR / f"{file_name}"
-OUTPUT_FILE = SCRIPT_DIR / f"merged_{target_house}_labview.csv"
+OUTPUT_FILE = SCRIPT_DIR / f"merged_{target_house}_{source}.csv"
 LOG_FILE = SCRIPT_DIR / "merge_log.txt"
 
 def merge():
