@@ -10,7 +10,8 @@
       "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\" model_comparison.py)",
       "Bash(dir:*)",
       "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\" \"E:\\MOIRAI\\scripts\\analyze_data_quality.py\")",
-      "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\":*)"
+      "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\":*)",
+      "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\" -c \"import matplotlib; print(matplotlib.get_backend())\")"
     ],
     "deny": [],
     "ask": []
