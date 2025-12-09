@@ -165,3 +165,8 @@ cython_debug/
 nul
 *.csv
 *.txt
+*.ckpt
+/outputs
+/data/buildingfm_processed
+/data/buildingfm_processed
+/data/buildingfm_processed

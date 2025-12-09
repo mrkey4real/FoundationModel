@@ -1,0 +1,963 @@
+# BuildingFM HVAC Super Schema v1.0
+#
+# Variable ID 分组逻辑 (遵循物理因果链):
+#   0-9:   Weather/Outdoor Environment (边界条件输入)
+#   10-29: Outdoor Unit & Main Power (室外机 & 总功率)
+#   30-49: Indoor Unit System (室内机系统)
+#   50-79: Zone Temperatures (区域温度 - 8个区域 x 6个传感器)
+#   80-95: Indoor Environment Quality (室内环境质量)
+#   96-111: Solar Heat Flux (太阳辐射热通量)
+#
+# 物理因果链: Weather → ODU Power → IDU Distribution → Zone Temps → IAQ
+
+schema_version: "1.0"
+frequency: "1min"  # 原始数据频率
+building_id: "East"
+data_source: ["labview", "egauge"]
+
+# ============================================================
+# GROUP 0: WEATHER / OUTDOOR ENVIRONMENT (0-9)
+# 边界条件 - 驱动整个HVAC系统的外部输入
+# ============================================================
+variables:
+  0:
+    name: outdoor_air_temperature
+    original_column: "labview_Air Temperature [degC]"
+    unit: "degC"
+    physical_range: [-40, 50]
+    group: "weather"
+    description: "Outdoor dry-bulb air temperature"
+
+  1:
+    name: outdoor_relative_humidity
+    original_column: "labview_Relative Humidity [%]"
+    unit: "%"
+    physical_range: [0, 100]
+    group: "weather"
+    description: "Outdoor relative humidity"
+
+  2:
+    name: outdoor_dew_point
+    original_column: "labview_Dew Point [degC]"
+    unit: "degC"
+    physical_range: [-50, 40]
+    group: "weather"
+    description: "Outdoor dew point temperature"
+
+  3:
+    name: outdoor_wind_chill
+    original_column: "labview_Wind Chill Temperature [degC]"
+    unit: "degC"
+    physical_range: [-60, 50]
+    group: "weather"
+    description: "Wind chill temperature (apparent temperature)"
+
+  4:
+    name: outdoor_wind_speed
+    original_column: "labview_Wind Speed [m/s]"
+    unit: "m/s"
+    physical_range: [0, 50]
+    group: "weather"
+    description: "Wind speed"
+
+  5:
+    name: outdoor_wind_direction
+    original_column: "labview_Wind Direction [deg]"
+    unit: "deg"
+    physical_range: [0, 360]
+    group: "weather"
+    description: "Wind direction (0=N, 90=E, 180=S, 270=W)"
+
+  6:
+    name: outdoor_air_pressure
+    original_column: "labview_Relative Air Pressure [kPa]"
+    unit: "kPa"
+    physical_range: [90, 110]
+    group: "weather"
+    description: "Barometric air pressure"
+
+  7:
+    name: outdoor_precipitation_type
+    original_column: "labview_Precipitation Type"
+    unit: "category"
+    physical_range: [0, 10]  # 分类编码
+    group: "weather"
+    description: "Precipitation type (0=none, 1=rain, 2=snow, etc.)"
+
+# ============================================================
+# GROUP 1: OUTDOOR UNIT & MAIN POWER (10-29)
+# 室外机运行状态 & 总电力监测
+# ============================================================
+  10:
+    name: main_power_kw
+    original_column: "egauge_Main Power [kW]"
+    unit: "kW"
+    physical_range: [0, 100]
+    group: "power_main"
+    description: "Total building main power (real power)"
+
+  11:
+    name: main_power_kva
+    original_column: "egauge_Main Power* [kVA]"
+    unit: "kVA"
+    physical_range: [0, 100]
+    group: "power_main"
+    description: "Total building main power (apparent power)"
+
+  12:
+    name: outdoor_unit_power_kw
+    original_column: "egauge_Outdoor Unit [kW]"
+    unit: "kW"
+    physical_range: [0, 20]
+    group: "power_odu"
+    description: "Outdoor unit real power consumption"
+
+  13:
+    name: outdoor_unit_power_kva
+    original_column: "egauge_Outdoor Unit* [kVA]"
+    unit: "kVA"
+    physical_range: [0, 20]
+    group: "power_odu"
+    description: "Outdoor unit apparent power"
+
+  # Individual circuit currents (S1-S14) - 用于细粒度功率分析
+  14:
+    name: circuit_s1_current
+    original_column: "egauge_S1 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S1 current"
+
+  15:
+    name: circuit_s2_current
+    original_column: "egauge_S2 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S2 current"
+
+  16:
+    name: circuit_s3_current
+    original_column: "egauge_S3 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S3 current"
+
+  17:
+    name: circuit_s4_current
+    original_column: "egauge_S4 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S4 current"
+
+  18:
+    name: circuit_s5_current
+    original_column: "egauge_S5 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S5 current"
+
+  19:
+    name: circuit_s6_current
+    original_column: "egauge_S6 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S6 current"
+
+  20:
+    name: circuit_s7_current
+    original_column: "egauge_S7 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S7 current"
+
+  21:
+    name: circuit_s8_current
+    original_column: "egauge_S8 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S8 current"
+
+  22:
+    name: circuit_s9_current
+    original_column: "egauge_S9 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S9 current"
+
+  23:
+    name: circuit_s10_current
+    original_column: "egauge_S10 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S10 current"
+
+  24:
+    name: circuit_s11_current
+    original_column: "egauge_S11 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S11 current"
+
+  25:
+    name: circuit_s12_current
+    original_column: "egauge_S12 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S12 current"
+
+  26:
+    name: circuit_s13_current
+    original_column: "egauge_S13 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S13 current"
+
+  27:
+    name: circuit_s14_current
+    original_column: "egauge_S14 [A]"
+    unit: "A"
+    physical_range: [0, 100]
+    group: "power_circuits"
+    description: "Circuit S14 current"
+
+# ============================================================
+# GROUP 2: INDOOR UNIT SYSTEM (30-49)
+# 室内机系统 - 功率、阀门、盘管
+# ============================================================
+  30:
+    name: indoor_unit_power_kw
+    original_column: "egauge_Indoor Unit [kW]"
+    unit: "kW"
+    physical_range: [0, 10]
+    group: "power_idu"
+    description: "Indoor unit real power consumption"
+
+  31:
+    name: indoor_unit_power_kva
+    original_column: "egauge_Indoor Unit* [kVA]"
+    unit: "kVA"
+    physical_range: [0, 10]
+    group: "power_idu"
+    description: "Indoor unit apparent power"
+
+  32:
+    name: indoor_unit_extra_power_kw
+    original_column: "egauge_Indoor Unit Extra [kW]"
+    unit: "kW"
+    physical_range: [0, 10]
+    group: "power_idu"
+    description: "Indoor unit extra circuit real power"
+
+  33:
+    name: indoor_unit_extra_power_kva
+    original_column: "egauge_Indoor Unit Extra* [kVA]"
+    unit: "kVA"
+    physical_range: [0, 10]
+    group: "power_idu"
+    description: "Indoor unit extra circuit apparent power"
+
+  # Supply/Valve Temperature Sensors - 室内机送风/阀后温度
+  # Note: Despite "SV" naming, these are temperature sensors (range ~10-50°C)
+  34:
+    name: supply_temp_sv1
+    original_column: "labview_SV1"
+    unit: "degC"
+    physical_range: [5, 60]
+    group: "idu_supply"
+    description: "Supply temperature sensor 1"
+
+  35:
+    name: supply_temp_sv2
+    original_column: "labview_SV2"
+    unit: "degC"
+    physical_range: [5, 60]
+    group: "idu_supply"
+    description: "Supply temperature sensor 2"
+
+  36:
+    name: supply_temp_sv4
+    original_column: "labview_SV4"
+    unit: "degC"
+    physical_range: [5, 60]
+    group: "idu_supply"
+    description: "Supply temperature sensor 4"
+
+  37:
+    name: supply_temp_sv5
+    original_column: "labview_SV5"
+    unit: "degC"
+    physical_range: [5, 60]
+    group: "idu_supply"
+    description: "Supply temperature sensor 5"
+
+  38:
+    name: supply_temp_sv6
+    original_column: "labview_SV6"
+    unit: "degC"
+    physical_range: [5, 60]
+    group: "idu_supply"
+    description: "Supply temperature sensor 6"
+
+  39:
+    name: supply_temp_sv2_new
+    original_column: "labview_SV2 New"
+    unit: "degC"
+    physical_range: [5, 60]
+    group: "idu_supply"
+    description: "Supply temperature sensor 2 (new system)"
+
+  40:
+    name: supply_temp_sv3_new
+    original_column: "labview_SV3 New"
+    unit: "degC"
+    physical_range: [5, 60]
+    group: "idu_supply"
+    description: "Supply temperature sensor 3 (new system)"
+
+  41:
+    name: bath2_supply_temp
+    original_column: "labview_Bath2 SV"
+    unit: "degC"
+    physical_range: [5, 60]
+    group: "idu_supply"
+    description: "Bathroom 2 supply temperature"
+
+  # Indoor Unit Coil & Distribution
+  42:
+    name: idu_return_air_temp
+    original_column: "labview_IDU Return Air"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "idu_coil"
+    description: "Indoor unit return air temperature"
+
+  43:
+    name: idu_distributor
+    original_column: "labview_IDU Distributor"
+    unit: "status"
+    physical_range: [0, 100]
+    group: "idu_coil"
+    description: "Refrigerant distributor position/status"
+
+  44:
+    name: idu_coil_intermediate_temp
+    original_column: "labview_IDU CoilInt"
+    unit: "degC"
+    physical_range: [-10, 60]
+    group: "idu_coil"
+    description: "Coil intermediate point temperature"
+
+  45:
+    name: idu_coil_outlet_temp
+    original_column: "labview_IDU CoilOut"
+    unit: "degC"
+    physical_range: [-10, 60]
+    group: "idu_coil"
+    description: "Coil outlet temperature"
+
+  46:
+    name: idu_coil_inlet_temp
+    original_column: "labview_IDU CoilIn"
+    unit: "degC"
+    physical_range: [-10, 60]
+    group: "idu_coil"
+    description: "Coil inlet temperature"
+
+  47:
+    name: thermostat_setpoint
+    original_column: "labview_Thermostat"
+    unit: "degC"
+    physical_range: [15, 30]
+    group: "idu_control"
+    description: "Thermostat temperature setpoint"
+
+# ============================================================
+# GROUP 3: ZONE TEMPERATURES (50-97)
+# 8个区域 x 6个温度传感器 = 48个变量
+# Zone naming: A-H, Sensors: 1,2,3,5,6,7 (no 4 - sensor gap)
+# ============================================================
+  # Zone A (50-55)
+  50:
+    name: zone_a_temp_1
+    original_column: "labview_A1"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_a"
+    description: "Zone A temperature sensor 1"
+  51:
+    name: zone_a_temp_2
+    original_column: "labview_A2"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_a"
+    description: "Zone A temperature sensor 2"
+  52:
+    name: zone_a_temp_3
+    original_column: "labview_A3"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_a"
+    description: "Zone A temperature sensor 3"
+  53:
+    name: zone_a_temp_5
+    original_column: "labview_A5"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_a"
+    description: "Zone A temperature sensor 5"
+  54:
+    name: zone_a_temp_6
+    original_column: "labview_A6"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_a"
+    description: "Zone A temperature sensor 6"
+  55:
+    name: zone_a_temp_7
+    original_column: "labview_A7"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_a"
+    description: "Zone A temperature sensor 7"
+
+  # Zone B (56-61)
+  56:
+    name: zone_b_temp_1
+    original_column: "labview_B1"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_b"
+    description: "Zone B temperature sensor 1"
+  57:
+    name: zone_b_temp_2
+    original_column: "labview_B2"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_b"
+    description: "Zone B temperature sensor 2"
+  58:
+    name: zone_b_temp_3
+    original_column: "labview_B3"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_b"
+    description: "Zone B temperature sensor 3"
+  59:
+    name: zone_b_temp_5
+    original_column: "labview_B5"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_b"
+    description: "Zone B temperature sensor 5"
+  60:
+    name: zone_b_temp_6
+    original_column: "labview_B6"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_b"
+    description: "Zone B temperature sensor 6"
+  61:
+    name: zone_b_temp_7
+    original_column: "labview_B7"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_b"
+    description: "Zone B temperature sensor 7"
+
+  # Zone C (62-67)
+  62:
+    name: zone_c_temp_1
+    original_column: "labview_C1"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_c"
+    description: "Zone C temperature sensor 1"
+  63:
+    name: zone_c_temp_2
+    original_column: "labview_C2"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_c"
+    description: "Zone C temperature sensor 2"
+  64:
+    name: zone_c_temp_3
+    original_column: "labview_C3"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_c"
+    description: "Zone C temperature sensor 3"
+  65:
+    name: zone_c_temp_5
+    original_column: "labview_C5"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_c"
+    description: "Zone C temperature sensor 5"
+  66:
+    name: zone_c_temp_6
+    original_column: "labview_C6"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_c"
+    description: "Zone C temperature sensor 6"
+  67:
+    name: zone_c_temp_7
+    original_column: "labview_C7"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_c"
+    description: "Zone C temperature sensor 7"
+
+  # Zone D (68-73)
+  68:
+    name: zone_d_temp_1
+    original_column: "labview_D1"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_d"
+    description: "Zone D temperature sensor 1"
+  69:
+    name: zone_d_temp_2
+    original_column: "labview_D2"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_d"
+    description: "Zone D temperature sensor 2"
+  70:
+    name: zone_d_temp_3
+    original_column: "labview_D3"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_d"
+    description: "Zone D temperature sensor 3"
+  71:
+    name: zone_d_temp_5
+    original_column: "labview_D5"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_d"
+    description: "Zone D temperature sensor 5"
+  72:
+    name: zone_d_temp_6
+    original_column: "labview_D6"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_d"
+    description: "Zone D temperature sensor 6"
+  73:
+    name: zone_d_temp_7
+    original_column: "labview_D7"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_d"
+    description: "Zone D temperature sensor 7"
+
+  # Zone E (74-79)
+  74:
+    name: zone_e_temp_1
+    original_column: "labview_E1"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_e"
+    description: "Zone E temperature sensor 1"
+  75:
+    name: zone_e_temp_2
+    original_column: "labview_E2"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_e"
+    description: "Zone E temperature sensor 2"
+  76:
+    name: zone_e_temp_3
+    original_column: "labview_E3"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_e"
+    description: "Zone E temperature sensor 3"
+  77:
+    name: zone_e_temp_5
+    original_column: "labview_E5"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_e"
+    description: "Zone E temperature sensor 5"
+  78:
+    name: zone_e_temp_6
+    original_column: "labview_E6"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_e"
+    description: "Zone E temperature sensor 6"
+  79:
+    name: zone_e_temp_7
+    original_column: "labview_E7"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_e"
+    description: "Zone E temperature sensor 7"
+
+  # Zone F (80-85)
+  80:
+    name: zone_f_temp_1
+    original_column: "labview_F1"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_f"
+    description: "Zone F temperature sensor 1"
+  81:
+    name: zone_f_temp_2
+    original_column: "labview_F2"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_f"
+    description: "Zone F temperature sensor 2"
+  82:
+    name: zone_f_temp_3
+    original_column: "labview_F3"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_f"
+    description: "Zone F temperature sensor 3"
+  83:
+    name: zone_f_temp_5
+    original_column: "labview_F5"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_f"
+    description: "Zone F temperature sensor 5"
+  84:
+    name: zone_f_temp_6
+    original_column: "labview_F6"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_f"
+    description: "Zone F temperature sensor 6"
+  85:
+    name: zone_f_temp_7
+    original_column: "labview_F7"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_f"
+    description: "Zone F temperature sensor 7"
+
+  # Zone G (86-91)
+  86:
+    name: zone_g_temp_1
+    original_column: "labview_G1"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_g"
+    description: "Zone G temperature sensor 1"
+  87:
+    name: zone_g_temp_2
+    original_column: "labview_G2"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_g"
+    description: "Zone G temperature sensor 2"
+  88:
+    name: zone_g_temp_3
+    original_column: "labview_G3"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_g"
+    description: "Zone G temperature sensor 3"
+  89:
+    name: zone_g_temp_5
+    original_column: "labview_G5"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_g"
+    description: "Zone G temperature sensor 5"
+  90:
+    name: zone_g_temp_6
+    original_column: "labview_G6"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_g"
+    description: "Zone G temperature sensor 6"
+  91:
+    name: zone_g_temp_7
+    original_column: "labview_G7"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_g"
+    description: "Zone G temperature sensor 7"
+
+  # Zone H (92-97)
+  92:
+    name: zone_h_temp_1
+    original_column: "labview_H1"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_h"
+    description: "Zone H temperature sensor 1"
+  93:
+    name: zone_h_temp_2
+    original_column: "labview_H2"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_h"
+    description: "Zone H temperature sensor 2"
+  94:
+    name: zone_h_temp_3
+    original_column: "labview_H3"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_h"
+    description: "Zone H temperature sensor 3"
+  95:
+    name: zone_h_temp_5
+    original_column: "labview_H5"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_h"
+    description: "Zone H temperature sensor 5"
+  96:
+    name: zone_h_temp_6
+    original_column: "labview_H6"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_h"
+    description: "Zone H temperature sensor 6"
+  97:
+    name: zone_h_temp_7
+    original_column: "labview_H7"
+    unit: "degC"
+    physical_range: [10, 40]
+    group: "zone_h"
+    description: "Zone H temperature sensor 7"
+
+# ============================================================
+# GROUP 4: INDOOR ENVIRONMENT QUALITY (98-103)
+# 室内空气质量
+# ============================================================
+  98:
+    name: thermostat_rh
+    original_column: "labview_TstatRH [%]"
+    unit: "%"
+    physical_range: [0, 100]
+    group: "iaq"
+    description: "Thermostat relative humidity"
+
+  99:
+    name: return_air_rh
+    original_column: "labview_Return RH[%]"
+    unit: "%"
+    physical_range: [0, 100]
+    group: "iaq"
+    description: "Return air relative humidity"
+
+  100:
+    name: indoor_co2
+    original_column: "labview_CO2 [ppm]"
+    unit: "ppm"
+    physical_range: [300, 5000]
+    group: "iaq"
+    description: "Indoor CO2 concentration"
+
+  101:
+    name: indoor_tvoc
+    original_column: "labview_TVOC[ug/m3]"
+    unit: "ug/m3"
+    physical_range: [0, 10000]
+    group: "iaq"
+    description: "Total volatile organic compounds"
+
+# ============================================================
+# GROUP 5: SOLAR HEAT FLUX (104-119)
+# 太阳辐射热通量 - 8个区域 x 2个方向
+# ============================================================
+  104:
+    name: zone_a_solar_top
+    original_column: "labview_A_Top_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone A top window solar heat flux"
+  105:
+    name: zone_a_solar_bottom
+    original_column: "labview_A_Bot_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone A bottom window solar heat flux"
+
+  106:
+    name: zone_b_solar_top
+    original_column: "labview_B_Top_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone B top window solar heat flux"
+  107:
+    name: zone_b_solar_bottom
+    original_column: "labview_B_Bot_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone B bottom window solar heat flux"
+
+  108:
+    name: zone_c_solar_top
+    original_column: "labview_C_Top_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone C top window solar heat flux"
+  109:
+    name: zone_c_solar_bottom
+    original_column: "labview_C_Bot_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone C bottom window solar heat flux"
+
+  110:
+    name: zone_d_solar_top
+    original_column: "labview_D_Top_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone D top window solar heat flux"
+  111:
+    name: zone_d_solar_bottom
+    original_column: "labview_D_Bot_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone D bottom window solar heat flux"
+
+  112:
+    name: zone_e_solar_top
+    original_column: "labview_E_Top_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone E top window solar heat flux"
+  113:
+    name: zone_e_solar_bottom
+    original_column: "labview_E_Bot_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone E bottom window solar heat flux"
+
+  114:
+    name: zone_f_solar_top
+    original_column: "labview_F_Top_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone F top window solar heat flux"
+  115:
+    name: zone_f_solar_bottom
+    original_column: "labview_F_Bot_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone F bottom window solar heat flux"
+
+  116:
+    name: zone_g_solar_top
+    original_column: "labview_G_Top_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone G top window solar heat flux"
+  117:
+    name: zone_g_solar_bottom
+    original_column: "labview_G_Bot_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone G bottom window solar heat flux"
+
+  118:
+    name: zone_h_solar_top
+    original_column: "labview_H_Top_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone H top window solar heat flux"
+  119:
+    name: zone_h_solar_bottom
+    original_column: "labview_H_Bot_HF [W/m^2]"
+    unit: "W/m2"
+    physical_range: [0, 1200]
+    group: "solar_flux"
+    description: "Zone H bottom window solar heat flux"
+
+# ============================================================
+# Variable Group Summary
+# ============================================================
+groups:
+  weather:
+    id_range: [0, 7]
+    description: "Outdoor weather conditions - boundary inputs to HVAC system"
+    count: 8
+
+  power_main:
+    id_range: [10, 11]
+    description: "Main building power measurements"
+    count: 2
+
+  power_odu:
+    id_range: [12, 13]
+    description: "Outdoor unit power measurements"
+    count: 2
+
+  power_circuits:
+    id_range: [14, 27]
+    description: "Individual circuit current measurements"
+    count: 14
+
+  power_idu:
+    id_range: [30, 33]
+    description: "Indoor unit power measurements"
+    count: 4
+
+  idu_supply:
+    id_range: [34, 41]
+    description: "Indoor unit supply air temperature sensors"
+    count: 8
+
+  idu_coil:
+    id_range: [42, 46]
+    description: "Indoor unit coil temperatures"
+    count: 5
+
+  idu_control:
+    id_range: [47, 47]
+    description: "Thermostat setpoint"
+    count: 1
+
+  zone_temps:
+    id_range: [50, 97]
+    description: "Zone air temperatures (8 zones x 6 sensors)"
+    count: 48
+
+  iaq:
+    id_range: [98, 101]
+    description: "Indoor air quality measurements"
+    count: 4
+
+  solar_flux:
+    id_range: [104, 119]
+    description: "Solar heat flux through windows (8 zones x 2 directions)"
+    count: 16
+
+# Total: 112 variables (matches data columns, excluding timestamp)

@@ -1,17 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python model_comparison.py:*)",
-      "Bash(conda activate:*)",
-      "Bash(where:*)",
-      "Bash(conda run:*)",
-      "Bash(conda env:*)",
-      "Bash(C:ProgramDataanaconda3envsfmpython.exe model_comparison.py)",
-      "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\" model_comparison.py)",
-      "Bash(dir:*)",
-      "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\" \"E:\\MOIRAI\\scripts\\analyze_data_quality.py\")",
-      "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\":*)",
-      "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\" -c \"import matplotlib; print(matplotlib.get_backend())\")"
+      "Bash(powershell.exe -Command \"cd E:\\MOIRAI; & ''C:\\ProgramData\\anaconda3\\condabin\\conda.bat'' run -n fm python scripts/train_buildingfm.py train --epochs 10 --batch-size 4\")",
+      "Bash(powershell.exe -Command \"cd E:\\MOIRAI; & ''C:\\ProgramData\\anaconda3\\condabin\\conda.bat'' run -n fm python -c \"\"from uni2ts.transform import AddObservedMask; import inspect; print(inspect.signature(AddObservedMask.__init__))\"\"\")",
+      "Bash(powershell.exe -Command \"chcp 65001; cd E:\\MOIRAI; $env:PYTHONPATH=''E:\\MOIRAI\\src''; & ''C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe'' scripts/train_buildingfm.py train --epochs 10 --batch-size 4 2>&1\")",
+      "Bash(powershell.exe -Command \"Get-ChildItem -Recurse ''E:\\MOIRAI\\outputs\\buildingfm'' | Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize\")",
+      "Bash(powershell.exe -Command \"chcp 65001; cd E:\\MOIRAI; $env:PYTHONPATH=''E:\\MOIRAI\\src''; & ''C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe'' scripts/train_buildingfm.py train --epochs 200 --batch-size 64 --num-workers 4 --patience 30 2>&1\")",
+      "Bash(powershell.exe -Command \"cd E:\\MOIRAI; $env:PYTHONPATH = ''E:\\MOIRAI\\src''; C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe scripts/train_buildingfm.py train --epochs 200 --batch-size 64 --num-workers 4 --patience 30\")"
     ],
     "deny": [],
     "ask": []
