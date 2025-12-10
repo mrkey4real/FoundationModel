@@ -4,12 +4,8 @@ BuildingFM Data Preparation Pipeline
 
 将 CSV 数据转换为 uni2ts 训练所需的格式。
 支持 "All-in-Target" 策略：所有变量都放入 target，让模型学习完整的物理因果链。
-
-Usage:
-    python scripts/prepare_buildingfm_data.py --config config/hvac_schema.yaml
 """
 
-import argparse
 import json
 import yaml
 import numpy as np
@@ -20,6 +16,25 @@ from datetime import datetime
 import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
+
+
+# ============================================================================
+# Configuration - 在这里修改配置参数
+# ============================================================================
+
+CONFIG = {
+    'schema_path': '../config/hvac_schema.yaml',
+    'input_csv': '../data/final_essential_merged_East_labview_egauge_15min.csv',
+    'output_dir': '../data/buildingfm_processed_15min',
+    'resample_freq': '15min',  # None 或 '5min', '15min' 等
+    'window_size': 96 * 14,     # 时间步数 (96*7 = 1周 @ 15min)
+    'stride': 96 * 14 // 2,     # 窗口步进 (50% overlap)
+    'train_ratio': 0.7,        # 训练集比例
+    'min_valid_ratio': 0.3,    # 每个窗口最小有效数据比例
+    'output_format': 'both',   # 'arrow', 'jsonl', 'both'
+}
+
+# ============================================================================
 
 
 def load_schema(schema_path: Path) -> Dict:
@@ -311,33 +326,10 @@ def create_metadata(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Prepare BuildingFM training data')
-    parser.add_argument('--config', type=str, default='config/hvac_schema.yaml',
-                       help='Path to HVAC schema YAML')
-    parser.add_argument('--input', type=str,
-                       default='data/final_essential_merged_East_labview_egauge_1min.csv',
-                       help='Input CSV file')
-    parser.add_argument('--output', type=str, default='data/buildingfm_processed',
-                       help='Output directory')
-    parser.add_argument('--resample', type=str, default=None,
-                       help='Resample frequency (e.g., "5min", "15min")')
-    parser.add_argument('--window-size', type=int, default=1440,
-                       help='Window size in time steps (default: 1440 = 1 day at 1min)')
-    parser.add_argument('--stride', type=int, default=720,
-                       help='Stride between windows (default: 720 = 12 hours)')
-    parser.add_argument('--train-ratio', type=float, default=0.8,
-                       help='Ratio of data for training (default: 0.8)')
-    parser.add_argument('--min-valid', type=float, default=0.3,
-                       help='Minimum valid data ratio per window (default: 0.3)')
-    parser.add_argument('--format', type=str, choices=['arrow', 'jsonl', 'both'],
-                       default='both', help='Output format')
-
-    args = parser.parse_args()
-
-    # Setup paths
-    schema_path = Path(args.config)
-    input_path = Path(args.input)
-    output_path = Path(args.output)
+    # Setup paths from CONFIG
+    schema_path = Path(CONFIG['schema_path'])
+    input_path = Path(CONFIG['input_csv'])
+    output_path = Path(CONFIG['output_dir'])
 
     # Load schema
     print("\n" + "="*60)
@@ -351,7 +343,7 @@ def main():
 
     # Load and validate data
     df, stats, available_cols = load_and_validate_csv(
-        input_path, schema, resample_freq=args.resample
+        input_path, schema, resample_freq=CONFIG['resample_freq']
     )
 
     # Create target array
@@ -369,19 +361,19 @@ def main():
         print(f"    {group_name}: {missing_rate:.2%}")
 
     # Split into windows
-    print(f"\nSplitting into windows (size={args.window_size}, stride={args.stride})...")
+    print(f"\nSplitting into windows (size={CONFIG['window_size']}, stride={CONFIG['stride']})...")
     samples = split_into_windows(
         df, target,
-        window_size=args.window_size,
-        stride=args.stride,
-        min_valid_ratio=args.min_valid
+        window_size=CONFIG['window_size'],
+        stride=CONFIG['stride'],
+        min_valid_ratio=CONFIG['min_valid_ratio']
     )
     print(f"  Created {len(samples)} valid windows")
 
     # Train/Val/Test split
     n_samples = len(samples)
-    n_train = int(n_samples * args.train_ratio)
-    n_val = int(n_samples * (1 - args.train_ratio) / 2)
+    n_train = int(n_samples * CONFIG['train_ratio'])
+    n_val = int(n_samples * (1 - CONFIG['train_ratio']) / 2)
     n_test = n_samples - n_train - n_val
 
     # Chronological split (not random)
@@ -392,18 +384,18 @@ def main():
     print(f"\n  Split: {n_train} train, {n_val} val, {n_test} test")
 
     # Determine frequency
-    freq = args.resample or '1min'
+    freq = CONFIG['resample_freq'] or '1min'
 
     # Save data
     print("\nSaving processed data...")
 
-    if args.format in ['arrow', 'both']:
+    if CONFIG['output_format'] in ['arrow', 'both']:
         arrow_path = output_path / 'arrow'
         save_to_arrow(train_samples, arrow_path, 'train')
         save_to_arrow(val_samples, arrow_path, 'val')
         save_to_arrow(test_samples, arrow_path, 'test')
 
-    if args.format in ['jsonl', 'both']:
+    if CONFIG['output_format'] in ['jsonl', 'both']:
         jsonl_path = output_path / 'jsonl'
         save_gluonts_format(train_samples, jsonl_path, 'train')
         save_gluonts_format(val_samples, jsonl_path, 'val')
@@ -418,7 +410,7 @@ def main():
     print(f"Output directory: {output_path}")
     print(f"Total samples: {len(samples)}")
     print(f"Variables: {num_variates}")
-    print(f"Window size: {args.window_size} ({args.window_size // 60:.1f} hours at 1min)")
+    print(f"Window size: {CONFIG['window_size']} steps")
 
 
 if __name__ == '__main__':

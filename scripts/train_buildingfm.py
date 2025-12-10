@@ -32,13 +32,13 @@ from datasets import Features, Sequence, Value
 RUN_MODE = 'train'
 
 # 数据路径
-DATA_DIR = '../data/buildingfm_processed'
-OUTPUT_DIR = '../outputs/buildingfm'
+DATA_DIR = '../data/buildingfm_processed_15min'
+OUTPUT_DIR = '../outputs/buildingfm_15min'
 
 # 训练参数
 EPOCHS = 500          # 最大训练轮数 (early stopping可能提前停止)
 BATCH_SIZE = 32       # 批大小 - RTX 5070 12GB 建议16-32
-LEARNING_RATE = 1e-4  # 学习率
+LEARNING_RATE = 1e-6  # 学习率
 PATIENCE = 30         # Early stopping耐心值
 
 # 模型参数
@@ -47,7 +47,7 @@ NUM_LAYERS = 6        # Transformer层数 (small=6, base=12, large=24)
 
 # 数据加载
 NUM_WORKERS = 0       # DataLoader工作进程数
-GPUS = 1              # GPU数量
+GPUS = 0              # GPU数量
 
 # 恢复训练 (设为checkpoint路径，如 'outputs/buildingfm/xxx/checkpoints/last.ckpt')
 RESUME_FROM = None

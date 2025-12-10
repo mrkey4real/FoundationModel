@@ -4,8 +4,8 @@ from pathlib import Path
 import pandas as pd
 
 # Paths
-SOURCE_CSV = Path(r"E:\MOIRAI\data\merged_East_labview_egauge_1min.csv")
-SELECTION_JSON = Path(r"E:\MOIRAI\data\quality_analysis\manual_column_selection.json")
+SOURCE_CSV = Path(r"..\data\merged_East_labview_egauge_15min.csv")
+SELECTION_JSON = Path(r"..\data\quality_analysis\manual_column_selection.json")
 OUTPUT_CSV = SOURCE_CSV.with_name(f"final_essential_{SOURCE_CSV.name}")
 
 

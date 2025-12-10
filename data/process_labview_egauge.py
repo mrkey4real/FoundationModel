@@ -15,7 +15,7 @@ labview_path = Path(f"./merged_{target_house}_labview.csv")
 
 start_time = "2025-01-01 00:00:00"
 end_time = "2025-12-01 00:00:00"
-resample_interval = "1min"  # 1min, 5min, 15min, 1h, etc.
+resample_interval = "15min"  # 1min, 5min, 15min, 1h, etc.
 
 output_path = Path(f"./merged_{target_house}_labview_egauge_{resample_interval}.csv")
 
