@@ -520,7 +520,7 @@ def train(
     trainer = L.Trainer(
         max_epochs=epochs,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-        devices=gpus,
+        devices=gpus if torch.cuda.is_available() else 1,
         callbacks=callbacks,
         logger=[tb_logger, csv_logger],
         gradient_clip_val=1.0,

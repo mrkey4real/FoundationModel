@@ -1,12 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(powershell.exe -Command \"cd E:\\MOIRAI; & ''C:\\ProgramData\\anaconda3\\condabin\\conda.bat'' run -n fm python scripts/train_buildingfm.py train --epochs 10 --batch-size 4\")",
-      "Bash(powershell.exe -Command \"cd E:\\MOIRAI; & ''C:\\ProgramData\\anaconda3\\condabin\\conda.bat'' run -n fm python -c \"\"from uni2ts.transform import AddObservedMask; import inspect; print(inspect.signature(AddObservedMask.__init__))\"\"\")",
-      "Bash(powershell.exe -Command \"chcp 65001; cd E:\\MOIRAI; $env:PYTHONPATH=''E:\\MOIRAI\\src''; & ''C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe'' scripts/train_buildingfm.py train --epochs 10 --batch-size 4 2>&1\")",
-      "Bash(powershell.exe -Command \"Get-ChildItem -Recurse ''E:\\MOIRAI\\outputs\\buildingfm'' | Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize\")",
-      "Bash(powershell.exe -Command \"chcp 65001; cd E:\\MOIRAI; $env:PYTHONPATH=''E:\\MOIRAI\\src''; & ''C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe'' scripts/train_buildingfm.py train --epochs 200 --batch-size 64 --num-workers 4 --patience 30 2>&1\")",
-      "Bash(powershell.exe -Command \"cd E:\\MOIRAI; $env:PYTHONPATH = ''E:\\MOIRAI\\src''; C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe scripts/train_buildingfm.py train --epochs 200 --batch-size 64 --num-workers 4 --patience 30\")"
+      "Bash(powershell.exe -Command \"chcp 65001; & ''C:\\Users\\qizixuan\\.conda\\envs\\fm\\python.exe'' -c \"\"import datasets; test_hf = datasets.load_from_disk(''C:/MOIRAI/data/buildingfm_processed/hf/buildingfm_test''); print(''All item_ids:''); for i in range(len(test_hf)): print(f''  Sample {i}: {test_hf[i][chr(39)+chr(105)+chr(116)+chr(101)+chr(109)+chr(95)+chr(105)+chr(100)+chr(39)]}'')\"\"\")",
+      "Bash(powershell.exe -Command \"chcp 65001; & ''C:\\Users\\qizixuan\\.conda\\envs\\fm\\python.exe'' -c \"\"import datasets; test_hf = datasets.load_from_disk(''C:/MOIRAI/data/buildingfm_processed/hf/buildingfm_test''); [print(f''Sample {i}: {test_hf[i][\\\"\"item_id\\\"\"]}'') for i in range(len(test_hf))]\"\"\")",
+      "Bash(powershell.exe -Command \"chcp 65001; & ''C:\\Users\\qizixuan\\.conda\\envs\\fm\\python.exe'' C:\\MOIRAI\\scripts\\check_samples.py\")",
+      "Bash(powershell.exe -Command \"Get-ChildItem ''C:\\MOIRAI\\outputs\\evaluation'' | Select-Object Name, Length, LastWriteTime\")",
+      "Bash(powershell.exe -Command \"chcp 65001; cd C:\\MOIRAI; & ''C:\\Users\\qizixuan\\.conda\\envs\\fm\\python.exe'' scripts\\analyze_variance.py\")"
     ],
     "deny": [],
     "ask": []
