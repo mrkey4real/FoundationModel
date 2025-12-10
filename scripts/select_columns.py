@@ -1,24 +1,36 @@
-"""
-Interactive column selection tool for HVAC dataset.
-Allows manual review of each column with statistics and visualization.
-"""
-
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 from pathlib import Path
 import json
-from datetime import datetime
+import re
+import sys
 
 # Configuration
-DATA_PATH = Path(r"E:\MOIRAI\data\final_merged_East_labview_egauge_1min.csv")
-OUTPUT_PATH = Path(r"E:\MOIRAI\data\quality_analysis\manual_column_selection.json")
-PROGRESS_PATH = Path(r"E:\MOIRAI\data\quality_analysis\selection_progress.json")
+DATA_PATH = Path(r"..\data\merged_East_labview_egauge_1min.csv")
+# 基础输出目录
+BASE_DIR = Path(r"..\data\quality_analysis")
+OUTPUT_PATH = BASE_DIR / "manual_column_selection.json"
+PROGRESS_PATH = BASE_DIR / "selection_progress.json"
+# 图片存放目录
+PLOTS_DIR = BASE_DIR / "plots_cache"
+
+
+def get_safe_filename(col_name):
+    """Convert column name to safe filename."""
+    # Replace non-alphanumeric characters with underscore
+    clean_name = re.sub(r'[^a-zA-Z0-9]', '_', col_name)
+    # Avoid overly long filenames
+    return f"{clean_name[:100]}.png"
 
 
 def load_data():
     """Load the merged dataset."""
     print("Loading data...")
+    if not DATA_PATH.exists():
+        print(f"Error: Data file not found at {DATA_PATH}")
+        sys.exit(1)
     df = pd.read_csv(DATA_PATH, parse_dates=['timestamp'], index_col='timestamp')
     print(f"Loaded {len(df)} rows, {len(df.columns)} columns")
     return df
@@ -234,26 +246,63 @@ def print_statistics(col, stats, idx, total):
     if stats['is_constant']:
         print(f"\n  *** WARNING: CONSTANT OR NEAR-CONSTANT ***")
 
-    # Physical range checks
-    col_lower = col.lower()
-    warnings = []
 
-    if 'rh' in col_lower or 'humidity' in col_lower:
-        if stats['min'] < 0 or stats['max'] > 100:
-            warnings.append(f"RH out of 0-100% range!")
+def generate_all_plots(df):
+    """Batch generate plots for all columns and save to disk."""
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    columns = list(df.columns)
+    total = len(columns)
 
-    if 'temp' in col_lower or 'degc' in col_lower:
-        if stats['min'] < -50 or stats['max'] > 150:
-            warnings.append(f"Temperature seems extreme!")
+    print(f"\nStarting batch generation of {total} plots...")
+    print(f"Saving to: {PLOTS_DIR}")
 
-    if '[kw]' in col_lower:
-        if stats['min'] < -1:
-            warnings.append(f"Significant negative power!")
+    for idx, col in enumerate(columns):
+        filename = get_safe_filename(col)
+        filepath = PLOTS_DIR / filename
 
-    if warnings:
-        print(f"\n[Physical Warnings]")
-        for w in warnings:
-            print(f"  *** {w} ***")
+        # Skip if already exists (resume capability)
+        if filepath.exists():
+            print(f"[{idx+1}/{total}] Skipping {col} (already exists)")
+            continue
+
+        print(f"[{idx+1}/{total}] Plotting {col}...")
+        
+        # Calculate stats (needed for plot lines)
+        stats = compute_statistics(df[col])
+        
+        # Create plot
+        fig = plot_column(df, col, stats)
+        
+        # Save and close immediately to free memory
+        try:
+            fig.savefig(filepath, dpi=100) # dpi=100 is enough for screen review
+        except Exception as e:
+            print(f"  Error saving {col}: {e}")
+        finally:
+            plt.close(fig) # Critical: close figure to prevent memory leak
+
+    print("\nBatch generation complete!")
+
+
+def show_saved_image(col):
+    """Load and display a saved image."""
+    filename = get_safe_filename(col)
+    filepath = PLOTS_DIR / filename
+
+    if not filepath.exists():
+        return False, None
+
+    try:
+        img = mpimg.imread(filepath)
+        fig, ax = plt.subplots(figsize=(14, 10))
+        ax.imshow(img)
+        ax.axis('off') # Hide axes since they are in the image
+        ax.set_title(f"Viewing cached plot: {col}", fontsize=10)
+        plt.tight_layout()
+        return True, fig
+    except Exception as e:
+        print(f"Error loading image: {e}")
+        return False, None
 
 
 def interactive_selection(df):
@@ -297,14 +346,18 @@ def interactive_selection(df):
             idx += 1
             continue
 
-        # Compute statistics
+        # Compute statistics (fast enough to do on the fly for text output)
         stats = compute_statistics(df[col])
-
-        # Print statistics
         print_statistics(col, stats, idx, total)
 
-        # Create and show plot
-        fig = plot_column(df, col, stats)
+        # Try to show saved image first
+        success, fig = show_saved_image(col)
+        
+        # If no image found, generate on the fly
+        if not success:
+            print("  (Cached plot not found, generating live...)")
+            fig = plot_column(df, col, stats)
+        
         plt.show(block=False)
         plt.pause(0.1)
 
@@ -364,7 +417,10 @@ def interactive_selection(df):
                     print("  Invalid number")
             elif choice == 'v':
                 plt.close(fig)
-                fig = plot_column(df, col, stats)
+                # Retry showing
+                success, fig = show_saved_image(col)
+                if not success:
+                    fig = plot_column(df, col, stats)
                 plt.show(block=False)
                 plt.pause(0.1)
             elif choice == 'q':
@@ -423,33 +479,55 @@ def main():
     print("INTERACTIVE COLUMN SELECTION TOOL")
     print("="*60)
 
-    # Check for existing progress
-    if PROGRESS_PATH.exists():
-        selections = load_progress()
-        print(f"\nFound existing progress:")
-        print(f"  Essential: {len(selections['essential'])}")
-        print(f"  Optional:  {len(selections['optional'])}")
-        print(f"  Toss:      {len(selections['toss'])}")
-        print(f"  Last index: {selections['last_index']}")
+    # Mode Selection
+    print("\nSelect Mode:")
+    print("  1. GENERATE PLOTS (Run this first, non-interactive)")
+    print("  2. START SELECTION (Interactive, loads generated plots)")
+    print("  3. View Summary only")
+    
+    mode = input("\nEnter mode [1/2/3]: ").strip()
 
-        choice = input("\n[c]ontinue, [r]estart, or [s]ummary? ").strip().lower()
-        if choice == 'r':
-            selections = {'essential': [], 'optional': [], 'toss': [], 'last_index': 0}
-        elif choice == 's':
+    if mode == '1':
+        # Batch generation mode
+        df = load_data()
+        generate_all_plots(df)
+        print("\nAll plots generated. You can now restart and run Mode 2.")
+    
+    elif mode == '2':
+        # Interactive mode
+        # Check for existing progress
+        if PROGRESS_PATH.exists():
+            selections = load_progress()
+            print(f"\nFound existing progress:")
+            print(f"  Essential: {len(selections['essential'])}")
+            print(f"  Optional:  {len(selections['optional'])}")
+            print(f"  Toss:      {len(selections['toss'])}")
+            print(f"  Last index: {selections['last_index']}")
+
+            choice = input("\n[c]ontinue, [r]estart? ").strip().lower()
+            if choice == 'r':
+                selections = {'essential': [], 'optional': [], 'toss': [], 'last_index': 0}
+        
+        # Load data
+        df = load_data()
+
+        # Start interactive selection
+        plt.ion()  # Enable interactive mode
+        selections = interactive_selection(df)
+        plt.ioff()
+        
+        # Show final summary
+        show_summary(selections)
+    
+    elif mode == '3':
+        if PROGRESS_PATH.exists():
+            selections = load_progress()
             show_summary(selections)
-            return
-
-    # Load data
-    df = load_data()
-
-    # Start interactive selection
-    plt.ion()  # Enable interactive mode
-    selections = interactive_selection(df)
-    plt.ioff()
-
-    # Show final summary
-    show_summary(selections)
-
+        else:
+            print("No progress file found.")
+    
+    else:
+        print("Invalid mode selected.")
 
 if __name__ == '__main__':
     main()
