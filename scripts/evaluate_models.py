@@ -64,23 +64,124 @@ from uni2ts.distribution import (
 # Configuration
 # =============================================================================
 
-# Model paths (relative to script directory)
-SMALL_MODEL_DIR = Path('../outputs/buildingfm/20251208_173657')
-BASE_MODEL_DIR = Path('../outputs/buildingfm/20251208_180818')
-BASELINES_DIR = Path('../outputs/baselines')
+# =============================================================================
+# Model Paths - 与 train_buildingfm.py 中的 model_name 对应
+# =============================================================================
+# 命名格式: moirai_{size}_{pattern}
+#   - size: small | base | large
+#   - pattern: full | freeze_ffn | head_only
+#
+# 目录结构:
+#   outputs/buildingfm_15min/
+#     ├── moirai_small_full/          <- 全量微调 small
+#     ├── moirai_small_freeze_ffn/    <- 冻结FFN small
+#     ├── moirai_small_head_only/     <- 只训练head small
+#     ├── moirai_base_full/           <- 全量微调 base
+#     ├── moirai_base_freeze_ffn/     <- 冻结FFN base
+#     ├── moirai_base_head_only/      <- 只训练head base
+#     │   ├── checkpoints/last.ckpt
+#     │   └── baseline_untrained.pt
+#     └── ...
+
+MODEL_OUTPUT_DIR = Path('../outputs/buildingfm_15min')
+BASELINES_DIR = Path('../outputs/baselines_15min')
+
+# =============================================================================
+# 评估模型配置 - 支持多种微调策略对比
+# =============================================================================
+# 模型尺寸
+MODEL_SIZES = ['small', 'base']
+
+# 微调策略
+FINETUNE_PATTERNS = ['full', 'freeze_ffn', 'head_only']
+
+# 自动生成所有模型目录
+def get_model_dir(size: str, pattern: str) -> Path:
+    return MODEL_OUTPUT_DIR / f'moirai_{size}_{pattern}'
+
+# 显示名称映射 (用于图表)
+DISPLAY_NAMES = {
+    'small_full': 'Small-Full',
+    'small_freeze_ffn': 'Small-FreezeFNN',
+    'small_head_only': 'Small-HeadOnly',
+    'base_full': 'Base-Full',
+    'base_freeze_ffn': 'Base-FreezeFNN',
+    'base_head_only': 'Base-HeadOnly',
+}
+
+# 颜色方案 (专业配色)
+MODEL_COLORS = {
+    # Baselines
+    'Seasonal Naive': '#7f8c8d',
+    'XGBoost': '#f39c12',
+    # Zero-shot
+    'Small (Zero-shot)': '#85c1e9',
+    'Base (Zero-shot)': '#f1948a',
+    # Full finetune
+    'Small-Full': '#2980b9',
+    'Base-Full': '#c0392b',
+    # Freeze FFN
+    'Small-FreezeFNN': '#27ae60',
+    'Base-FreezeFNN': '#8e44ad',
+    # Head only
+    'Small-HeadOnly': '#16a085',
+    'Base-HeadOnly': '#d35400',
+}
 
 # Data path
-DATA_DIR = Path('../data/buildingfm_processed')
+DATA_DIR = Path('../data/buildingfm_processed_15min')
 
 # Output
-OUTPUT_DIR = Path('../outputs/evaluation')
+OUTPUT_DIR = Path('../outputs/evaluation_15min')
 
-# Prediction settings
-CONTEXT_LENGTH = 256 * 6    # 1536 timesteps (~25.6 hours at 1min)
-PREDICTION_LENGTH = 64 * 6  # 384 timesteps (~6.4 hours at 1min)
-PATCH_SIZE = 128            # Patch size for MOIRAI
+# =============================================================================
+# Plot Style Configuration - 更大更美观的图表
+# =============================================================================
+plt.rcParams.update({
+    'figure.dpi': 120,
+    'savefig.dpi': 180,
+    'font.size': 11,
+    'axes.titlesize': 13,
+    'axes.labelsize': 11,
+    'xtick.labelsize': 10,
+    'ytick.labelsize': 10,
+    'legend.fontsize': 9,
+    'figure.titlesize': 15,
+})
+
+# =============================================================================
+# Frequency Configuration - ONLY CHANGE THIS!
+# =============================================================================
+DATA_FREQ = '15min'  # Options: '1min', '5min', '15min', '30min', '1H', etc.
+
+# Auto-calculated time steps (DO NOT modify manually)
+_freq_minutes = pd.Timedelta(DATA_FREQ).total_seconds() / 60
+STEPS_PER_HOUR = int(60 / _freq_minutes)
+STEPS_PER_DAY = int(24 * 60 / _freq_minutes)
+STEPS_PER_WEEK = int(7 * 24 * 60 / _freq_minutes)
+
+# =============================================================================
+# Window Configuration - MUST ALIGN WITH prepare_buildingfm_data.py!
+# =============================================================================
+# prepare_buildingfm_data.py: window_size = 96 * 14 = 1344 (14 days)
+# CONSTRAINT: CONTEXT_LENGTH + PREDICTION_LENGTH <= window_size
+SAMPLE_WINDOW_SIZE = STEPS_PER_DAY * 14  # Must match prepare_buildingfm_data.py
+
+# Prediction settings (expressed in human-readable units)
+CONTEXT_DAYS = 11           # 11 days of history
+PREDICTION_DAYS = 3         # 3 days forecast horizon
+CONTEXT_LENGTH = CONTEXT_DAYS * STEPS_PER_DAY      # 11 × 96 = 1056
+PREDICTION_LENGTH = PREDICTION_DAYS * STEPS_PER_DAY  # 3 × 96 = 288
+# Total: 1056 + 288 = 1344 <= 1344 ✓
+
+# Validation: ensure we don't exceed sample window
+assert CONTEXT_LENGTH + PREDICTION_LENGTH <= SAMPLE_WINDOW_SIZE, \
+    f"CONTEXT({CONTEXT_LENGTH}) + PREDICTION({PREDICTION_LENGTH}) > WINDOW({SAMPLE_WINDOW_SIZE})!"
+
+# PATCH_SIZE: target ~8 hours per patch for good daily pattern capture
+PATCH_SIZE = max(8, STEPS_PER_HOUR * 8)  # 8 hours worth of steps
 NUM_SAMPLES = 50            # Number of samples for probabilistic prediction
-SEASONAL_PERIOD = 1440      # 1 day = 1440 minutes for Seasonal Naive
+SEASONAL_PERIOD = STEPS_PER_DAY  # Daily seasonality (auto-calculated)
 
 # Evaluation settings
 MAX_EVAL_SAMPLES = 20       # Number of test samples to evaluate
@@ -458,8 +559,8 @@ class XGBoostModel:
     Must match train_baselines.py feature engineering!
     """
     
-    # Lag steps must match train_baselines.py
-    LAG_STEPS = [1, 60, 360, 1440]  # 1min, 1hr, 6hr, 1day
+    # Lag steps: auto-calculated from global frequency settings
+    LAG_STEPS = [1, STEPS_PER_HOUR, STEPS_PER_HOUR * 6, STEPS_PER_DAY]  # 1step, 1hr, 6hr, 1day
     
     def __init__(self, model_path: Optional[Path] = None):
         self.model = None
@@ -536,9 +637,9 @@ def create_distr_output():
     )
 
 
-def load_model_from_baseline(checkpoint_path: Path) -> MoiraiModule:
+def load_model_from_baseline(checkpoint_path: Path, device: str = 'cpu') -> MoiraiModule:
     """Load MoiraiModule from baseline .pt file"""
-    state = torch.load(checkpoint_path, map_location='cpu')
+    state = torch.load(checkpoint_path, map_location=device)
     d_model = state['config']['d_model']
     num_layers = state['config']['num_layers']
     patch_sizes = state['config']['patch_sizes']
@@ -559,19 +660,34 @@ def load_model_from_baseline(checkpoint_path: Path) -> MoiraiModule:
     return module
 
 
-def load_model_from_checkpoint(checkpoint_path: Path) -> MoiraiModule:
-    """Load MoiraiModule from Lightning checkpoint"""
-    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+def load_model_from_checkpoint(checkpoint_path: Path, device: str = 'cpu') -> MoiraiModule:
+    """Load MoiraiModule from Lightning checkpoint (finetuned).
     
-    hparams = checkpoint['hyper_parameters']
-    module_kwargs = hparams['module_kwargs']
-    
-    module = MoiraiModule(**module_kwargs)
+    Requires baseline_untrained.pt in parent directory for architecture config.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     state_dict = checkpoint['state_dict']
     module_state = {k.replace('module.', ''): v for k, v in state_dict.items() if k.startswith('module.')}
-    module.load_state_dict(module_state)
     
+    # Load architecture from local baseline
+    baseline_path = checkpoint_path.parent.parent / 'baseline_untrained.pt'
+    assert baseline_path.exists(), f"Missing baseline: {baseline_path}"
+    
+    baseline_state = torch.load(baseline_path, map_location=device)
+    config = baseline_state['config']
+    
+    module = MoiraiModule(
+        distr_output=create_distr_output(),
+        d_model=config['d_model'],
+        num_layers=config['num_layers'],
+        patch_sizes=config['patch_sizes'],
+        max_seq_len=config['max_seq_len'],
+        attn_dropout_p=0.0,
+        dropout_p=0.1,
+        scaling=True,
+    )
+    module.load_state_dict(module_state)
     return module
 
 
@@ -581,7 +697,7 @@ def prepare_native_input(
     prediction_length: int,
     patch_size: int,
     max_patch_size: int = 128,
-    device: str = 'cuda'
+    device: str = 'cpu'
 ) -> Tuple[torch.Tensor, ...]:
     """
     Prepare input tensors in the same format as MoiraiPretrain training.
@@ -664,7 +780,7 @@ def predict_moirai(
     prediction_length: int,
     patch_size: int = PATCH_SIZE,
     num_samples: int = NUM_SAMPLES,
-    device: str = 'cuda'
+    device: str = 'cpu'
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Make prediction using native MoiraiModule interface.
@@ -821,7 +937,7 @@ def predict_fill_in_blank(
     prediction_length: int,
     patch_size: int = PATCH_SIZE,
     num_samples: int = NUM_SAMPLES,
-    device: str = 'cuda'
+    device: str = 'cpu'
 ) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
     """
     Predict masked variables given observed variables.
@@ -961,7 +1077,8 @@ def task1_standard_forecast(
                 metrics = calculate_all_metrics(future_true, point_pred, samples, seasonal_mae)
                 results[model_name].append(metrics)
                 
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     # Aggregate metrics
     aggregated = {}
@@ -1057,7 +1174,8 @@ def task2_fill_in_blank(
                 metrics = calculate_all_metrics(y_true, point_pred, samples)
                 results[model_name].append(metrics)
             
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     # Aggregate
     aggregated = {}
@@ -1181,7 +1299,8 @@ def task3_ood_stress_test(
                 for condition in applicable_conditions:
                     results[condition][model_name].append(metrics)
             
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     # Aggregate
     aggregated = {}
@@ -1204,41 +1323,57 @@ def task3_ood_stress_test(
 # =============================================================================
 
 def plot_training_curves(output_dir: Path):
-    """Plot training curves for both models."""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    """Plot training curves for all finetune patterns (2 rows × 3 cols)."""
+    fig, axes = plt.subplots(2, 3, figsize=(20, 12))
     
-    for idx, (model_dir, title) in enumerate([
-        (SMALL_MODEL_DIR, 'Small Model (d_model=384, layers=6)'),
-        (BASE_MODEL_DIR, 'Base Model (d_model=768, layers=6)')
-    ]):
-        csv_path = model_dir / 'csv_logs' / 'version_0' / 'metrics.csv'
-        if csv_path.exists():
-            df = pd.read_csv(csv_path)
-            
-            train_df = df[df['train/PackedNLLLoss'].notna()][['epoch', 'train/PackedNLLLoss']]
-            val_df = df[df['val/PackedNLLLoss'].notna()][['epoch', 'val/PackedNLLLoss']]
-            
-            train_loss = train_df.groupby('epoch')['train/PackedNLLLoss'].mean()
-            val_loss = val_df.groupby('epoch')['val/PackedNLLLoss'].mean()
-            
-            axes[idx].plot(train_loss.index, train_loss.values, 'b-', alpha=0.7, label='Train', lw=1.5)
-            axes[idx].plot(val_loss.index, val_loss.values, 'r-', label='Val', lw=2)
-            
-            best_epoch = val_loss.idxmin()
-            best_loss = val_loss.min()
-            axes[idx].scatter([best_epoch], [best_loss], color='green', s=100, zorder=5)
-            axes[idx].annotate(f'Best: {best_loss:.4f}\nEpoch {int(best_epoch)}',
-                             xy=(best_epoch, best_loss), xytext=(best_epoch + 15, best_loss + 0.3),
-                             fontsize=10, color='green', arrowprops=dict(arrowstyle='->', color='green'))
-        
-        axes[idx].set_xlabel('Epoch')
-        axes[idx].set_ylabel('Loss (PackedNLLLoss)')
-        axes[idx].set_title(title, fontweight='bold')
-        axes[idx].legend()
-        axes[idx].grid(True, alpha=0.3)
+    pattern_titles = {
+        'full': 'Full Finetune',
+        'freeze_ffn': 'Freeze FFN',
+        'head_only': 'Head Only',
+    }
     
+    line_styles = {'Train': ('b-', 0.6), 'Val': ('r-', 1.0)}
+    
+    for row_idx, size in enumerate(MODEL_SIZES):
+        for col_idx, pattern in enumerate(FINETUNE_PATTERNS):
+            ax = axes[row_idx, col_idx]
+            model_dir = get_model_dir(size, pattern)
+            csv_path = model_dir / 'csv_logs' / 'version_0' / 'metrics.csv'
+            
+            if csv_path.exists():
+                df = pd.read_csv(csv_path)
+                
+                train_df = df[df['train/PackedNLLLoss'].notna()][['epoch', 'train/PackedNLLLoss']]
+                val_df = df[df['val/PackedNLLLoss'].notna()][['epoch', 'val/PackedNLLLoss']]
+                
+                train_loss = train_df.groupby('epoch')['train/PackedNLLLoss'].mean()
+                val_loss = val_df.groupby('epoch')['val/PackedNLLLoss'].mean()
+                
+                ax.plot(train_loss.index, train_loss.values, 'b-', alpha=0.6, label='Train', lw=1.5)
+                ax.plot(val_loss.index, val_loss.values, 'r-', label='Val', lw=2.5)
+                
+                best_epoch = val_loss.idxmin()
+                best_loss = val_loss.min()
+                ax.scatter([best_epoch], [best_loss], color='#27ae60', s=120, zorder=5, edgecolor='white', lw=2)
+                ax.annotate(f'Best: {best_loss:.4f}\nEpoch {int(best_epoch)}',
+                           xy=(best_epoch, best_loss), xytext=(best_epoch + 5, best_loss + 0.2),
+                           fontsize=10, color='#27ae60', fontweight='bold',
+                           arrowprops=dict(arrowstyle='->', color='#27ae60', lw=1.5))
+            else:
+                ax.text(0.5, 0.5, 'No Data', ha='center', va='center', transform=ax.transAxes,
+                       fontsize=14, color='#bdc3c7')
+            
+            ax.set_xlabel('Epoch', fontweight='bold')
+            ax.set_ylabel('Loss (PackedNLLLoss)', fontweight='bold')
+            ax.set_title(f'{size.upper()} - {pattern_titles[pattern]}', fontweight='bold', fontsize=13)
+            ax.legend(loc='upper right', framealpha=0.9)
+            ax.grid(True, alpha=0.3, linestyle='--')
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+    
+    plt.suptitle('Training Curves: All Finetune Strategies', fontweight='bold', fontsize=16, y=1.02)
     plt.tight_layout()
-    plt.savefig(output_dir / 'training_curves.png', dpi=150, bbox_inches='tight')
+    plt.savefig(output_dir / 'training_curves.png', dpi=180, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f"  Saved: training_curves.png")
 
@@ -1249,22 +1384,17 @@ def plot_metrics_comparison(results: Dict[str, Dict[str, Dict[str, float]]], out
     groups = list(EVAL_GROUPS.keys())
     metrics = ['SMAPE', 'CRPS', 'MSIS', 'MAE']
     
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # 更大的图表以容纳更多模型
+    fig, axes = plt.subplots(2, 2, figsize=(24, 16))
     axes = axes.flatten()
     
-    colors = {
-        'Seasonal Naive': '#95a5a6',
-        'XGBoost': '#f39c12',
-        'Small (Zero-shot)': '#3498db',
-        'Small (Fine-tuned)': '#2ecc71',
-        'Base (Zero-shot)': '#e74c3c',
-        'Base (Fine-tuned)': '#9b59b6',
-    }
+    # 动态调整bar宽度
+    num_models = len(models)
+    width = 0.8 / max(num_models, 1)
     
     for ax_idx, metric in enumerate(metrics):
         ax = axes[ax_idx]
         x = np.arange(len(groups))
-        width = 0.12
         
         for i, model in enumerate(models):
             if model not in results:
@@ -1277,109 +1407,117 @@ def plot_metrics_comparison(results: Dict[str, Dict[str, Dict[str, float]]], out
                 else:
                     values.append(np.nan)
             
-            offset = (i - len(models) / 2 + 0.5) * width
-            ax.bar(x + offset, values, width, label=model, color=colors.get(model, 'gray'), alpha=0.85)
+            offset = (i - num_models / 2 + 0.5) * width
+            color = MODEL_COLORS.get(model, '#95a5a6')
+            bars = ax.bar(x + offset, values, width * 0.9, label=model, color=color, alpha=0.85, edgecolor='white', lw=0.5)
         
-        ax.set_xlabel('Variable Group')
-        ax.set_ylabel(metric)
-        ax.set_title(f'{metric} Comparison', fontweight='bold')
+        ax.set_xlabel('Variable Group', fontweight='bold', fontsize=12)
+        ax.set_ylabel(metric, fontweight='bold', fontsize=12)
+        ax.set_title(f'{metric} Comparison', fontweight='bold', fontsize=14)
         ax.set_xticks(x)
-        ax.set_xticklabels(groups, rotation=30, ha='right')
-        ax.grid(True, alpha=0.3, axis='y')
-        ax.legend(loc='upper right', fontsize=8)
+        ax.set_xticklabels(groups, rotation=25, ha='right', fontsize=11)
+        ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        # Legend outside plot area
+        ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1), fontsize=9, framealpha=0.9)
     
+    plt.suptitle('Task 1: Standard Forecasting - Metrics Comparison', fontweight='bold', fontsize=16, y=1.01)
     plt.tight_layout()
-    plt.savefig(output_dir / 'metrics_comparison.png', dpi=150, bbox_inches='tight')
+    plt.savefig(output_dir / 'metrics_comparison.png', dpi=180, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f"  Saved: metrics_comparison.png")
 
 
 def plot_crps_distribution(results: Dict[str, Dict[str, Dict[str, float]]], output_dir: Path):
-    """Plot CRPS distribution as boxplot across variable groups."""
-    moirai_models = [m for m in results.keys() if 'MOIRAI' in m or 'Small' in m or 'Base' in m]
+    """Plot CRPS comparison grouped by variable group with all MOIRAI models."""
+    moirai_models = [m for m in results.keys() if 'Small' in m or 'Base' in m]
     groups = list(EVAL_GROUPS.keys())
     
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(20, 10))
     
-    positions = []
-    crps_data = []
-    labels = []
-    colors = []
+    # Group by variable group, show all models side by side
+    x = np.arange(len(groups))
+    num_models = len(moirai_models)
+    width = 0.8 / max(num_models, 1)
     
-    color_map = {
-        'Small (Zero-shot)': '#3498db',
-        'Small (Fine-tuned)': '#2ecc71',
-        'Base (Zero-shot)': '#e74c3c',
-        'Base (Fine-tuned)': '#9b59b6',
-    }
-    
-    pos = 0
-    for group in groups:
-        for model in moirai_models:
+    for i, model in enumerate(moirai_models):
+        values = []
+        for group in groups:
             if model in results and group in results[model]:
                 crps = results[model][group].get('CRPS', np.nan)
-                if not np.isnan(crps):
-                    positions.append(pos)
-                    crps_data.append([crps])  # Boxplot expects list
-                    labels.append(f'{model}\n{group}')
-                    colors.append(color_map.get(model, 'gray'))
-                    pos += 1
-        pos += 0.5  # Gap between groups
+                values.append(crps)
+            else:
+                values.append(np.nan)
+        
+        offset = (i - num_models / 2 + 0.5) * width
+        color = MODEL_COLORS.get(model, '#95a5a6')
+        bars = ax.bar(x + offset, values, width * 0.9, label=model, color=color, alpha=0.85, edgecolor='white', lw=0.5)
+        
+        # Add value labels on bars
+        for bar, val in zip(bars, values):
+            if not np.isnan(val) and val > 0:
+                ax.annotate(f'{val:.3f}', xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                           xytext=(0, 3), textcoords='offset points', ha='center', fontsize=8, rotation=45)
     
-    if crps_data:
-        bp = ax.bar(range(len(crps_data)), [d[0] for d in crps_data], color=colors, alpha=0.8)
-        ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
-    
-    ax.set_ylabel('CRPS (lower is better)')
-    ax.set_title('CRPS by Model and Variable Group', fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
+    ax.set_xlabel('Variable Group', fontweight='bold', fontsize=12)
+    ax.set_ylabel('CRPS (lower is better)', fontweight='bold', fontsize=12)
+    ax.set_title('CRPS Comparison Across Finetune Strategies', fontweight='bold', fontsize=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels(groups, fontsize=11)
+    ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1), fontsize=10, framealpha=0.9)
     
     plt.tight_layout()
-    plt.savefig(output_dir / 'crps_distribution.png', dpi=150, bbox_inches='tight')
+    plt.savefig(output_dir / 'crps_distribution.png', dpi=180, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f"  Saved: crps_distribution.png")
 
 
 def plot_fill_in_blank_results(results: Dict[str, Dict[str, float]], output_dir: Path):
-    """Plot fill-in-the-blank task results."""
+    """Plot fill-in-the-blank task results for all MOIRAI models."""
     models = list(results.keys())
     metrics = ['SMAPE', 'CRPS', 'MAE']
     
-    fig, axes = plt.subplots(1, 3, figsize=(14, 5))
-    
-    colors = ['#2ecc71', '#9b59b6', '#3498db', '#e74c3c']
+    fig, axes = plt.subplots(1, 3, figsize=(22, 8))
     
     for ax_idx, metric in enumerate(metrics):
         ax = axes[ax_idx]
         values = [results[m].get(metric, np.nan) for m in models]
+        colors = [MODEL_COLORS.get(m, '#95a5a6') for m in models]
         
-        bars = ax.bar(range(len(models)), values, color=colors[:len(models)], alpha=0.85)
+        bars = ax.bar(range(len(models)), values, color=colors, alpha=0.85, edgecolor='white', lw=1)
         
         for bar, val in zip(bars, values):
             if not np.isnan(val):
-                ax.annotate(f'{val:.2f}', xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
-                          xytext=(0, 3), textcoords='offset points', ha='center', fontsize=10)
+                ax.annotate(f'{val:.3f}', xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                          xytext=(0, 5), textcoords='offset points', ha='center', fontsize=11, fontweight='bold')
         
         ax.set_xticks(range(len(models)))
-        ax.set_xticklabels(models, rotation=30, ha='right')
-        ax.set_ylabel(metric)
-        ax.set_title(f'Fill-in-Blank: {metric}', fontweight='bold')
-        ax.grid(True, alpha=0.3, axis='y')
+        ax.set_xticklabels(models, rotation=35, ha='right', fontsize=10)
+        ax.set_ylabel(metric, fontweight='bold', fontsize=12)
+        ax.set_title(f'{metric}', fontweight='bold', fontsize=13)
+        ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
     
-    plt.suptitle('Fill-in-the-Blank Task: ODU Power Prediction\n(Given Weather + Zone Temps)', fontweight='bold', y=1.02)
+    plt.suptitle('Task 2: Fill-in-the-Blank (ODU Power Prediction)\nGiven: Weather + Zone Temps → Predict: ODU Power', 
+                fontweight='bold', fontsize=14, y=1.02)
     plt.tight_layout()
-    plt.savefig(output_dir / 'fill_in_blank.png', dpi=150, bbox_inches='tight')
+    plt.savefig(output_dir / 'fill_in_blank.png', dpi=180, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f"  Saved: fill_in_blank.png")
 
 
 def plot_ood_performance(results: Dict[str, Dict[str, Dict[str, float]]], output_dir: Path):
-    """Plot OOD stress test performance."""
+    """Plot OOD stress test performance for all models."""
     conditions = list(results.keys())
     models = list(next(iter(results.values())).keys())
     
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(26, 10))
     
     condition_names = {
         'high_temp': f'High Temp (>{OOD_THRESHOLDS["high_temp"]}°C)',
@@ -1387,37 +1525,30 @@ def plot_ood_performance(results: Dict[str, Dict[str, Dict[str, float]]], output
         'high_load': f'High Load (>{OOD_THRESHOLDS["high_load"]*100:.0f}% max)'
     }
     
-    colors = {
-        'Seasonal Naive': '#95a5a6',
-        'XGBoost': '#f39c12',
-        'Small (Zero-shot)': '#3498db',
-        'Small (Fine-tuned)': '#2ecc71',
-        'Base (Zero-shot)': '#e74c3c',
-        'Base (Fine-tuned)': '#9b59b6',
-    }
-    
     for ax_idx, condition in enumerate(conditions):
         ax = axes[ax_idx]
         
         smape_values = [results[condition][m].get('SMAPE', np.nan) for m in models]
+        colors = [MODEL_COLORS.get(m, '#95a5a6') for m in models]
         
-        bars = ax.bar(range(len(models)), smape_values, 
-                     color=[colors.get(m, 'gray') for m in models], alpha=0.85)
+        bars = ax.bar(range(len(models)), smape_values, color=colors, alpha=0.85, edgecolor='white', lw=1)
         
         for bar, val in zip(bars, smape_values):
             if not np.isnan(val):
                 ax.annotate(f'{val:.1f}', xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
-                          xytext=(0, 3), textcoords='offset points', ha='center', fontsize=9)
+                          xytext=(0, 5), textcoords='offset points', ha='center', fontsize=10, fontweight='bold')
         
         ax.set_xticks(range(len(models)))
-        ax.set_xticklabels(models, rotation=45, ha='right', fontsize=9)
-        ax.set_ylabel('SMAPE')
-        ax.set_title(condition_names.get(condition, condition), fontweight='bold')
-        ax.grid(True, alpha=0.3, axis='y')
+        ax.set_xticklabels(models, rotation=40, ha='right', fontsize=10)
+        ax.set_ylabel('SMAPE', fontweight='bold', fontsize=12)
+        ax.set_title(condition_names.get(condition, condition), fontweight='bold', fontsize=13)
+        ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
     
-    plt.suptitle('OOD Stress Test: SMAPE under Extreme Conditions', fontweight='bold', y=1.02)
+    plt.suptitle('Task 3: OOD Stress Test - SMAPE under Extreme Conditions', fontweight='bold', fontsize=15, y=1.02)
     plt.tight_layout()
-    plt.savefig(output_dir / 'ood_performance.png', dpi=150, bbox_inches='tight')
+    plt.savefig(output_dir / 'ood_performance.png', dpi=180, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f"  Saved: ood_performance.png")
 
@@ -1430,7 +1561,12 @@ def plot_sample_predictions(
     output_dir: Path,
     device: str
 ):
-    """Plot sample predictions for visual comparison."""
+    """
+    Plot sample predictions with probabilistic confidence intervals.
+    
+    For MOIRAI models: shows 90% confidence interval (5th-95th percentile) from samples.
+    For baselines: only shows point prediction (no distribution available).
+    """
     sample = test_hf[0]
     target = np.array(sample['target'])
     
@@ -1439,17 +1575,13 @@ def plot_sample_predictions(
     start_idx = find_best_window(var_data, CONTEXT_LENGTH, PREDICTION_LENGTH)
     full_window = var_data[start_idx:start_idx + CONTEXT_LENGTH + PREDICTION_LENGTH]
     
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    axes = axes.flatten()
+    # Dynamic grid layout based on number of models
+    num_models = len(models)
+    ncols = min(4, num_models)
+    nrows = (num_models + ncols - 1) // ncols
     
-    colors = {
-        'Seasonal Naive': '#95a5a6',
-        'XGBoost': '#f39c12',
-        'Small (Zero-shot)': '#3498db',
-        'Small (Fine-tuned)': '#2ecc71',
-        'Base (Zero-shot)': '#e74c3c',
-        'Base (Fine-tuned)': '#9b59b6',
-    }
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 6 * nrows))
+    axes = np.array(axes).flatten() if num_models > 1 else [axes]
     
     seasonal_naive = SeasonalNaiveModel()
     
@@ -1460,46 +1592,191 @@ def plot_sample_predictions(
         
         context = full_window[:CONTEXT_LENGTH]
         future_true = full_window[CONTEXT_LENGTH:]
+        samples = None  # Will hold distribution samples for MOIRAI
         
         if model_name == 'Seasonal Naive':
             point_pred, _ = seasonal_naive.predict(context, PREDICTION_LENGTH)
         elif model_name == 'XGBoost':
             point_pred, _ = model.predict(context, PREDICTION_LENGTH) if model else (np.full(PREDICTION_LENGTH, np.nan), None)
         elif model is not None:
-            point_pred, _ = predict_moirai(model, full_window, CONTEXT_LENGTH, PREDICTION_LENGTH, PATCH_SIZE, NUM_SAMPLES, device)
+            # MOIRAI: get both point prediction and samples for confidence interval
+            point_pred, samples = predict_moirai(model, full_window, CONTEXT_LENGTH, PREDICTION_LENGTH, PATCH_SIZE, NUM_SAMPLES, device)
         else:
             point_pred = np.full(PREDICTION_LENGTH, np.nan)
         
         time_axis = np.arange(len(full_window))
+        pred_time_axis = time_axis[CONTEXT_LENGTH:CONTEXT_LENGTH + len(point_pred)]
         
-        ax.plot(time_axis[:CONTEXT_LENGTH], full_window[:CONTEXT_LENGTH], 'b-', alpha=0.5, label='Context', lw=1)
-        ax.plot(time_axis[CONTEXT_LENGTH:], future_true, 'g-', lw=2, label='Truth')
-        ax.plot(time_axis[CONTEXT_LENGTH:CONTEXT_LENGTH + len(point_pred)], point_pred,
-               color=colors.get(model_name, 'gray'), linestyle='--', lw=2, label='Prediction')
+        # Plot context
+        ax.plot(time_axis[:CONTEXT_LENGTH], full_window[:CONTEXT_LENGTH], '#3498db', alpha=0.4, label='Context', lw=1.2)
         
-        ax.axvline(x=CONTEXT_LENGTH, color='gray', linestyle=':', alpha=0.5)
+        # Plot confidence interval (if samples available)
+        pred_color = MODEL_COLORS.get(model_name, '#e74c3c')
+        if samples is not None and len(samples) > 1:
+            # Calculate percentiles for confidence intervals
+            p5 = np.percentile(samples, 5, axis=0)
+            p25 = np.percentile(samples, 25, axis=0)
+            p75 = np.percentile(samples, 75, axis=0)
+            p95 = np.percentile(samples, 95, axis=0)
+            
+            # Plot 90% interval (5th-95th)
+            ax.fill_between(pred_time_axis, p5, p95, alpha=0.2, color=pred_color, label='90% CI')
+            # Plot 50% interval (25th-75th)
+            ax.fill_between(pred_time_axis, p25, p75, alpha=0.3, color=pred_color, label='50% CI')
         
+        # Plot ground truth
+        ax.plot(time_axis[CONTEXT_LENGTH:], future_true, '#27ae60', lw=2.5, label='Truth')
+        
+        # Plot point prediction (median)
+        ax.plot(pred_time_axis, point_pred, color=pred_color, linestyle='--', lw=2.0, label='Median')
+        
+        # Vertical line at prediction start
+        ax.axvline(x=CONTEXT_LENGTH, color='#7f8c8d', linestyle=':', alpha=0.7, lw=1.5)
+        
+        # Title with metrics
         if not np.isnan(point_pred).all():
             smape = calculate_smape(future_true, point_pred)
-            ax.set_title(f'{model_name}\nSMAPE={smape:.1f}', fontweight='bold')
+            title_text = f'{model_name}\nSMAPE = {smape:.2f}'
+            if samples is not None:
+                crps = calculate_crps(future_true, samples)
+                title_text += f' | CRPS = {crps:.3f}'
+            ax.set_title(title_text, fontweight='bold', fontsize=11)
         else:
-            ax.set_title(f'{model_name}\n(No prediction)', fontweight='bold')
+            ax.set_title(f'{model_name}\n(No prediction)', fontweight='bold', fontsize=12, color='#bdc3c7')
         
-        ax.set_xlabel('Time Step')
-        ax.set_ylabel(var_name)
-        ax.legend(loc='upper right', fontsize=8)
-        ax.grid(True, alpha=0.3)
+        ax.set_xlabel('Time Step', fontweight='bold')
+        ax.set_ylabel(var_name, fontweight='bold')
+        ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
     
     # Hide unused axes
     for idx in range(len(models), len(axes)):
         axes[idx].axis('off')
     
-    plt.suptitle(f'Sample Predictions: {var_name}', fontweight='bold', fontsize=14, y=1.02)
+    plt.suptitle(f'Sample Predictions Comparison: {var_name}', fontweight='bold', fontsize=16, y=1.02)
     plt.tight_layout()
     safe_name = var_name.replace('/', '_').replace(' ', '_').replace('[', '').replace(']', '')
-    plt.savefig(output_dir / f'predictions_{safe_name}.png', dpi=150, bbox_inches='tight')
+    plt.savefig(output_dir / f'predictions_{safe_name}.png', dpi=180, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f"  Saved: predictions_{safe_name}.png")
+
+
+def plot_finetune_strategy_comparison(results: Dict[str, Dict[str, Dict[str, float]]], output_dir: Path):
+    """
+    Create a comprehensive comparison chart specifically for finetune strategies.
+    Shows Small vs Base across Full/FreezeFNN/HeadOnly with heatmap style.
+    """
+    # Extract MOIRAI models only
+    strategies = ['Full', 'FreezeFNN', 'HeadOnly']
+    sizes = ['Small', 'Base']
+    metric = 'SMAPE'  # Primary metric
+    
+    # Build data matrix
+    data = np.zeros((len(sizes), len(strategies)))
+    
+    for i, size in enumerate(sizes):
+        for j, strategy in enumerate(strategies):
+            model_name = f'{size}-{strategy}'
+            if model_name in results:
+                # Average across all variable groups
+                values = [results[model_name][g].get(metric, np.nan) 
+                         for g in results[model_name].keys() if isinstance(results[model_name][g], dict)]
+                valid_values = [v for v in values if not np.isnan(v)]
+                data[i, j] = np.mean(valid_values) if valid_values else np.nan
+    
+    fig, axes = plt.subplots(1, 3, figsize=(24, 8))
+    
+    # Subplot 1: Heatmap of average SMAPE
+    ax1 = axes[0]
+    im = ax1.imshow(data, cmap='RdYlGn_r', aspect='auto')
+    ax1.set_xticks(np.arange(len(strategies)))
+    ax1.set_yticks(np.arange(len(sizes)))
+    ax1.set_xticklabels(strategies, fontsize=12, fontweight='bold')
+    ax1.set_yticklabels(sizes, fontsize=12, fontweight='bold')
+    
+    # Add value annotations
+    for i in range(len(sizes)):
+        for j in range(len(strategies)):
+            val = data[i, j]
+            if not np.isnan(val):
+                color = 'white' if val > np.nanmean(data) else 'black'
+                ax1.text(j, i, f'{val:.1f}', ha='center', va='center', fontsize=14, fontweight='bold', color=color)
+    
+    ax1.set_title('Average SMAPE by Strategy\n(lower is better)', fontweight='bold', fontsize=13)
+    cbar = plt.colorbar(im, ax=ax1, shrink=0.8)
+    cbar.set_label('SMAPE', fontweight='bold')
+    
+    # Subplot 2: Bar chart comparison by size
+    ax2 = axes[1]
+    x = np.arange(len(strategies))
+    width = 0.35
+    
+    for i, size in enumerate(sizes):
+        values = data[i, :]
+        offset = (i - 0.5) * width
+        color = '#2980b9' if size == 'Small' else '#c0392b'
+        ax2.bar(x + offset, values, width, label=size, color=color, alpha=0.85, edgecolor='white', lw=1)
+    
+    ax2.set_xlabel('Finetune Strategy', fontweight='bold', fontsize=12)
+    ax2.set_ylabel('Average SMAPE', fontweight='bold', fontsize=12)
+    ax2.set_title('Strategy Comparison by Model Size', fontweight='bold', fontsize=13)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(strategies, fontsize=11)
+    ax2.legend(fontsize=11, framealpha=0.9)
+    ax2.grid(True, alpha=0.3, axis='y', linestyle='--')
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    
+    # Subplot 3: Improvement over zero-shot
+    ax3 = axes[2]
+    
+    # Get zero-shot baselines
+    zs_small = results.get('Small (Zero-shot)', {})
+    zs_base = results.get('Base (Zero-shot)', {})
+    
+    improvements = np.zeros((len(sizes), len(strategies)))
+    for i, (size, zs) in enumerate(zip(sizes, [zs_small, zs_base])):
+        zs_values = [zs[g].get(metric, np.nan) for g in zs.keys() if isinstance(zs.get(g), dict)]
+        zs_avg = np.nanmean(zs_values) if zs_values else np.nan
+        
+        for j, strategy in enumerate(strategies):
+            if not np.isnan(zs_avg) and not np.isnan(data[i, j]):
+                # Improvement = (zs - ft) / zs * 100  (positive = better)
+                improvements[i, j] = (zs_avg - data[i, j]) / zs_avg * 100
+    
+    for i, size in enumerate(sizes):
+        values = improvements[i, :]
+        offset = (i - 0.5) * width
+        color = '#27ae60' if size == 'Small' else '#8e44ad'
+        bars = ax3.bar(x + offset, values, width, label=size, color=color, alpha=0.85, edgecolor='white', lw=1)
+        
+        # Add value labels
+        for bar, val in zip(bars, values):
+            if not np.isnan(val):
+                ypos = bar.get_height()
+                va = 'bottom' if ypos >= 0 else 'top'
+                ax3.annotate(f'{val:+.1f}%', xy=(bar.get_x() + bar.get_width() / 2, ypos),
+                           xytext=(0, 3 if ypos >= 0 else -3), textcoords='offset points',
+                           ha='center', va=va, fontsize=10, fontweight='bold')
+    
+    ax3.axhline(y=0, color='#7f8c8d', linestyle='-', lw=1.5)
+    ax3.set_xlabel('Finetune Strategy', fontweight='bold', fontsize=12)
+    ax3.set_ylabel('Improvement over Zero-shot (%)', fontweight='bold', fontsize=12)
+    ax3.set_title('Finetune Gain vs Zero-shot Baseline', fontweight='bold', fontsize=13)
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(strategies, fontsize=11)
+    ax3.legend(fontsize=11, framealpha=0.9)
+    ax3.grid(True, alpha=0.3, axis='y', linestyle='--')
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
+    
+    plt.suptitle('Finetune Strategy Comparison: Full vs Freeze-FFN vs Head-Only', fontweight='bold', fontsize=16, y=1.02)
+    plt.tight_layout()
+    plt.savefig(output_dir / 'finetune_strategy_comparison.png', dpi=180, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: finetune_strategy_comparison.png")
 
 
 def create_summary_table(all_results: Dict, output_dir: Path):
@@ -1618,11 +1895,7 @@ def main():
     
     models = {
         'Seasonal Naive': SeasonalNaiveModel(),
-        'XGBoost': None,  # Will be loaded if exists
-        'Small (Zero-shot)': None,
-        'Small (Fine-tuned)': None,
-        'Base (Zero-shot)': None,
-        'Base (Fine-tuned)': None,
+        'XGBoost': None,
     }
     
     # Load XGBoost if available
@@ -1633,30 +1906,42 @@ def main():
     else:
         print("  XGBoost model not found (skipping)")
     
-    # Load MOIRAI models
-    small_baseline_path = SMALL_MODEL_DIR / 'baseline_untrained.pt'
-    if small_baseline_path.exists():
-        print("  Loading Small Zero-shot...")
-        models['Small (Zero-shot)'] = load_model_from_baseline(small_baseline_path)
+    # Load MOIRAI models: all sizes × all finetune patterns
+    # First load zero-shot baselines (one per size)
+    for size in MODEL_SIZES:
+        # Use any pattern's baseline (they are identical)
+        baseline_path = get_model_dir(size, 'full') / 'baseline_untrained.pt'
+        if baseline_path.exists():
+            display_name = f'{size.capitalize()} (Zero-shot)'
+            print(f"  Loading {display_name}...")
+            models[display_name] = load_model_from_baseline(baseline_path, device)
     
-    small_ckpt = SMALL_MODEL_DIR / 'checkpoints' / 'last.ckpt'
-    if small_ckpt.exists():
-        print("  Loading Small Fine-tuned...")
-        models['Small (Fine-tuned)'] = load_model_from_checkpoint(small_ckpt)
-    
-    base_baseline_path = BASE_MODEL_DIR / 'baseline_untrained.pt'
-    if base_baseline_path.exists():
-        print("  Loading Base Zero-shot...")
-        models['Base (Zero-shot)'] = load_model_from_baseline(base_baseline_path)
-    
-    base_ckpt = BASE_MODEL_DIR / 'checkpoints' / 'last.ckpt'
-    if base_ckpt.exists():
-        print("  Loading Base Fine-tuned...")
-        models['Base (Fine-tuned)'] = load_model_from_checkpoint(base_ckpt)
+    # Load all finetuned models
+    for size in MODEL_SIZES:
+        for pattern in FINETUNE_PATTERNS:
+            model_dir = get_model_dir(size, pattern)
+            ckpt_dir = model_dir / 'checkpoints'
+            
+            # Find best checkpoint (latest by modification time, skip first 2 epochs)
+            all_best = list(ckpt_dir.glob('best-*.ckpt'))
+            # Filter: epoch > 2 (filename: best-{epoch:02d}-{val_loss:.4f}.ckpt)
+            valid_ckpts = [p for p in all_best if int(p.stem.split('-')[1]) > 2]
+            best_ckpts = sorted(valid_ckpts, key=lambda p: p.stat().st_mtime, reverse=True)
+            ckpt_path = best_ckpts[0] if best_ckpts else None
+            
+            if ckpt_path and ckpt_path.exists():
+                display_name = DISPLAY_NAMES.get(f'{size}_{pattern}', f'{size}-{pattern}')
+                print(f"  Loading {display_name} from {ckpt_path.name}...")
+                models[display_name] = load_model_from_checkpoint(ckpt_path, device)
+            else:
+                display_name = DISPLAY_NAMES.get(f'{size}_{pattern}', f'{size}-{pattern}')
+                print(f"  {display_name} checkpoint not found (skipping)")
     
     # Filter out None models for counting
     loaded_models = {k: v for k, v in models.items() if v is not None}
-    print(f"  Loaded {len(loaded_models)} models")
+    print(f"\n  Total loaded: {len(loaded_models)} models")
+    for name in loaded_models.keys():
+        print(f"    - {name}")
     
     # Store all results
     all_results = {}
@@ -1727,19 +2012,28 @@ def main():
     # =========================================================================
     print("\n[6/7] Generating visualizations...")
     
+    # Training curves for all finetune strategies
     plot_training_curves(output_dir)
+    
+    # Metrics comparison (all models)
     plot_metrics_comparison(task1_results, output_dir)
     
+    # CRPS distribution for probabilistic models
     if moirai_models:
         plot_crps_distribution(task1_results, output_dir)
     
+    # Finetune strategy comparison (key insight chart)
+    plot_finetune_strategy_comparison(task1_results, output_dir)
+    
+    # Fill-in-blank results (MOIRAI only)
     if all_results.get('task2'):
         plot_fill_in_blank_results(all_results['task2'], output_dir)
     
+    # OOD stress test results
     if any(all_results['task3'].values()):
         plot_ood_performance(all_results['task3'], output_dir)
     
-    # Sample predictions
+    # Sample predictions (visual comparison)
     plot_sample_predictions(models, test_hf, 10, 'Main Power [kW]', output_dir, device)
     plot_sample_predictions(models, test_hf, 50, 'Zone A1 Temp [°C]', output_dir, device)
     

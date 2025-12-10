@@ -22,13 +22,28 @@ from tqdm import tqdm
 # Configuration - 在这里修改配置参数
 # ============================================================================
 
+# =============================================================================
+# Frequency Configuration - 修改这里会自动调整所有相关参数
+# =============================================================================
+DATA_FREQ = '15min'  # Options: '1min', '5min', '15min', '30min', '1H', etc.
+
+# Auto-calculated time steps
+_freq_minutes = pd.Timedelta(DATA_FREQ).total_seconds() / 60
+STEPS_PER_HOUR = int(60 / _freq_minutes)
+STEPS_PER_DAY = int(24 * 60 / _freq_minutes)
+STEPS_PER_WEEK = int(7 * 24 * 60 / _freq_minutes)
+
+# Window configuration (in days for clarity)
+WINDOW_DAYS = 14        # Each sample covers 14 days
+STRIDE_DAYS = 7         # 50% overlap (slide by 7 days)
+
 CONFIG = {
     'schema_path': '../config/hvac_schema.yaml',
     'input_csv': '../data/final_essential_merged_East_labview_egauge_15min.csv',
     'output_dir': '../data/buildingfm_processed_15min',
-    'resample_freq': '15min',  # None 或 '5min', '15min' 等
-    'window_size': 96 * 14,     # 时间步数 (96*7 = 1周 @ 15min)
-    'stride': 96 * 14 // 2,     # 窗口步进 (50% overlap)
+    'resample_freq': DATA_FREQ,
+    'window_size': WINDOW_DAYS * STEPS_PER_DAY,   # 14 days in steps
+    'stride': STRIDE_DAYS * STEPS_PER_DAY,        # 7 days in steps
     'train_ratio': 0.7,        # 训练集比例
     'min_valid_ratio': 0.3,    # 每个窗口最小有效数据比例
     'output_format': 'both',   # 'arrow', 'jsonl', 'both'

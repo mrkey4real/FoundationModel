@@ -6,7 +6,8 @@ BuildingFM Training Script - Spyder Friendly Version
 
 使用方法:
     1. 首次运行: 设置 RUN_MODE = 'build' 来构建数据集
-    2. 训练: 设置 RUN_MODE = 'train' 来训练模型
+    2. 从零训练: 设置 RUN_MODE = 'train' 
+    3. 微调预训练: 设置 RUN_MODE = 'finetune' (推荐!)
 """
 
 import json
@@ -25,32 +26,79 @@ import datasets
 from datasets import Features, Sequence, Value
 
 # =============================================================================
-# 配置参数 - 在这里直接修改！
+# 配置参数 - 只需修改这一个区块！
 # =============================================================================
 
-# 运行模式: 'build' 构建数据集 (首次需要), 'train' 训练模型
-RUN_MODE = 'train'
-
-# 数据路径
-DATA_DIR = '../data/buildingfm_processed_15min'
-OUTPUT_DIR = '../outputs/buildingfm_15min'
-
-# 训练参数
-EPOCHS = 500          # 最大训练轮数 (early stopping可能提前停止)
-BATCH_SIZE = 32       # 批大小 - RTX 5070 12GB 建议16-32
-LEARNING_RATE = 1e-6  # 学习率
-PATIENCE = 30         # Early stopping耐心值
-
-# 模型参数
-D_MODEL = 768         # 模型隐藏维度 (small=384, base=768, large=1024)
-NUM_LAYERS = 6        # Transformer层数 (small=6, base=12, large=24)
-
-# 数据加载
-NUM_WORKERS = 0       # DataLoader工作进程数
-GPUS = 0              # GPU数量
-
-# 恢复训练 (设为checkpoint路径，如 'outputs/buildingfm/xxx/checkpoints/last.ckpt')
-RESUME_FROM = None
+CONFIG = {
+    # -------------------------------------------------------------------------
+    # 基础设置
+    # -------------------------------------------------------------------------
+    'mode': 'finetune',        # 'build' | 'train' | 'finetune'
+    'data_dir': '../data/buildingfm_processed_15min',
+    'output_dir': '../outputs/buildingfm_15min',
+    
+    # -------------------------------------------------------------------------
+    # 微调配置 (mode='finetune' 时使用) - 推荐!
+    # -------------------------------------------------------------------------
+    'finetune': {
+        # 预训练模型: 'small' | 'base' | 'large'
+        # small: 14M参数, 4-6GB显存, 快速实验
+        # base:  80M参数, 8-12GB显存, 推荐RTX 5070
+        # large: 300M参数, 16GB+显存, 追求极致
+        'pretrained': 'base',
+        
+        # 微调策略: 'full' | 'freeze_ffn' | 'head_only'
+        # full:       全参数微调 (数据量>10k)
+        # freeze_ffn: 冻结FFN层 (数据量1k-10k, 推荐默认)
+        # head_only:  只训练输出头 (数据量<1k, 防过拟合)
+        'pattern': 'freeze_ffn',
+        
+        # 输出目录命名: 自动生成为 moirai_{pretrained}_{pattern}
+        # 例如: moirai_base_full, moirai_small_freeze_ffn
+        # 设为 None 则自动生成，也可手动指定如 'my_custom_name'
+        'model_name': None,
+        
+        # 超参数 - 比从零训练更保守!
+        'epochs': 50,          # 微调3-20轮通常足够
+        'lr': 5e-5,            # 学习率: 1e-6 ~ 1e-5 (比预训练低!)
+        'batch_size': 32,      # 批大小
+        'patience': 15,         # Early stopping
+        'weight_decay': 0.01,  # 权重衰减
+        'warmup_steps': 100,   # Warmup步数 (微调少一些)
+    },
+    
+    # -------------------------------------------------------------------------
+    # 从零训练配置 (mode='train' 时使用)
+    # -------------------------------------------------------------------------
+    'train': {
+        # 模型命名 (用于evaluate)
+        'model_name': 'moirai_small_scratch',
+        
+        # 模型架构
+        'd_model': 384,        # 隐藏维度: 384(small) | 768(base) | 1024(large)
+        'num_layers': 6,       # 层数: 6(small) | 12(base) | 24(large)
+        
+        # 超参数
+        'epochs': 50,          # 训练轮数
+        'lr': 1e-4,            # 学习率
+        'batch_size': 32,      # 批大小
+        'patience': 30,        # Early stopping
+        'weight_decay': 0.1,   # 权重衰减
+    },
+    
+    # -------------------------------------------------------------------------
+    # 硬件设置
+    # -------------------------------------------------------------------------
+    'hardware': {
+        'num_workers': 0,      # DataLoader进程数 (Windows建议0)
+        'gpus': 1,             # GPU数量
+    },
+    
+    # -------------------------------------------------------------------------
+    # 恢复训练 (可选)
+    # -------------------------------------------------------------------------
+    'resume_from': None,       # checkpoint路径，如 'outputs/.../last.ckpt'
+}
 
 # =============================================================================
 # 以下是代码实现，一般不需要修改
@@ -62,7 +110,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from uni2ts.data.dataset import TimeSeriesDataset, SampleTimeSeriesType
 from uni2ts.data.indexer import HuggingFaceDatasetIndexer
 from uni2ts.data.loader import DataLoader, PackCollate
-from uni2ts.model.moirai import MoiraiPretrain, MoiraiModule
+from uni2ts.model.moirai import MoiraiPretrain, MoiraiModule, MoiraiFinetune
 from uni2ts.distribution import (
     MixtureOutput,
     StudentTOutput,
@@ -70,6 +118,13 @@ from uni2ts.distribution import (
     NegativeBinomialOutput,
     LogNormalOutput,
 )
+
+# HuggingFace预训练模型映射
+PRETRAINED_MODEL_MAP = {
+    'small': 'Salesforce/moirai-1.0-R-small',
+    'base': 'Salesforce/moirai-1.0-R-base', 
+    'large': 'Salesforce/moirai-1.0-R-large',
+}
 
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, Callback
@@ -369,6 +424,7 @@ def save_baseline_model(model: MoiraiPretrain, output_dir: Path):
 def train(
     data_dir: Path,
     output_dir: Path,
+    model_name: str = 'moirai_small_scratch',
     epochs: int = 100,
     batch_size: int = 32,
     lr: float = 1e-4,
@@ -427,8 +483,12 @@ def train(
         num_warmup_steps=num_warmup_steps,
     )
 
-    # 创建输出目录
-    run_dir = output_dir / datetime.now().strftime('%Y%m%d_%H%M%S')
+    # 创建输出目录 - 使用简洁命名，方便evaluate
+    run_dir = output_dir / model_name
+    if run_dir.exists():
+        # 如果已存在，追加时间戳避免覆盖
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_dir = output_dir / f'{model_name}_{timestamp}'
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # 保存未训练的基线模型
@@ -516,28 +576,38 @@ def train(
     tb_logger = TensorBoardLogger(save_dir=run_dir, name='tensorboard')
     csv_logger = CSVLogger(save_dir=run_dir, name='csv_logs')
 
+    # 设备检测
+    device_available = torch.cuda.is_available()
+    accelerator = 'gpu' if device_available else 'cpu'
+    devices_count = gpus if device_available else 1
+    precision = 'bf16-mixed' if device_available else 32
+    
     # Trainer
     trainer = L.Trainer(
         max_epochs=epochs,
-        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-        devices=gpus if torch.cuda.is_available() else 1,
+        accelerator=accelerator,
+        devices=devices_count,
         callbacks=callbacks,
         logger=[tb_logger, csv_logger],
         gradient_clip_val=1.0,
         log_every_n_steps=100,
         enable_progress_bar=True,
-        precision='bf16-mixed' if torch.cuda.is_available() else 32,
+        precision=precision,
         accumulate_grad_batches=1,
         val_check_interval=1.0,
     )
 
-    # GPU信息
-    if torch.cuda.is_available():
+    # 设备信息
+    if device_available:
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-        print(f"\nGPU: {gpu_name}")
+        print(f"\n设备: GPU - {gpu_name}")
         print(f"  显存: {gpu_mem:.1f} GB")
         print(f"  精度: bf16-mixed")
+    else:
+        print(f"\n设备: CPU")
+        print(f"  精度: float32")
+        print(f"  注意: CPU训练会比GPU慢很多，建议使用GPU")
 
     print(f"\n输出目录: {run_dir}")
     print(f"实时曲线: {run_dir / 'training_progress.png'}")
@@ -565,37 +635,320 @@ def train(
 
 
 # =============================================================================
+# 微调函数 (加载预训练权重)
+# =============================================================================
+
+def finetune(
+    data_dir: Path,
+    output_dir: Path,
+    model_name: str = 'moirai_small',
+    pretrained_model: str = 'small',
+    finetune_pattern: str = 'full',
+    epochs: int = 10,
+    batch_size: int = 16,
+    lr: float = 5e-6,
+    weight_decay: float = 0.01,
+    num_workers: int = 4,
+    gpus: int = 1,
+    resume: Optional[str] = None,
+    patience: int = 5,
+):
+    """微调预训练MOIRAI模型"""
+    
+    # 设置GPU优化
+    torch.set_float32_matmul_precision('high')
+    
+    # 解析预训练模型路径
+    if pretrained_model in PRETRAINED_MODEL_MAP:
+        model_path = PRETRAINED_MODEL_MAP[pretrained_model]
+        model_size = pretrained_model
+    else:
+        model_path = pretrained_model
+        model_size = 'custom'
+    
+    print(f"\n{'='*60}")
+    print(f"BuildingFM Fine-tuning (微调预训练模型)")
+    print(f"{'='*60}")
+    print(f"预训练模型: {model_path}")
+    print(f"微调策略: {finetune_pattern}")
+    
+    # 加载元数据
+    hf_data_dir = data_dir / 'hf'
+    with open(hf_data_dir / 'metadata.json') as f:
+        metadata = json.load(f)
+    
+    num_variates = metadata['num_variates']
+    print(f"变量数: {num_variates}")
+    
+    # 从HuggingFace加载预训练模型
+    print(f"\n正在从HuggingFace加载预训练权重...")
+    print(f"  -> {model_path}")
+    pretrained_module = MoiraiModule.from_pretrained(model_path)
+    
+    d_model = pretrained_module.d_model
+    num_layers = pretrained_module.num_layers
+    print(f"  模型配置: d_model={d_model}, layers={num_layers}")
+    print(f"  预训练权重加载成功!")
+    
+    # 加载数据集
+    train_hf = datasets.load_from_disk(str(hf_data_dir / 'buildingfm_train'))
+    val_hf = datasets.load_from_disk(str(hf_data_dir / 'buildingfm_val'))
+    
+    print(f"\n训练集: {len(train_hf)} samples")
+    print(f"验证集: {len(val_hf)} samples")
+    
+    # 计算训练步数
+    num_batches_per_epoch = max(10, len(train_hf) // batch_size)
+    num_training_steps = epochs * num_batches_per_epoch
+    num_warmup_steps = min(100, num_training_steps // 10)  # 微调warmup更少
+    
+    print(f"\n微调配置:")
+    print(f"  Epochs: {epochs}")
+    print(f"  Batch size: {batch_size}")
+    print(f"  Learning rate: {lr:.2e}")
+    print(f"  Finetune pattern: {finetune_pattern}")
+    print(f"  Total steps: {num_training_steps}")
+    print(f"  Warmup steps: {num_warmup_steps}")
+    print(f"  Early stopping patience: {patience} epochs")
+    
+    # 创建模型 - 使用MoiraiPretrain + 预训练权重进行领域适配
+    # 这样可以学习领域知识，同时支持多下游任务
+    model = MoiraiPretrain(
+        module=pretrained_module,  # 传入预训练权重!
+        min_patches=2,
+        min_mask_ratio=0.15,
+        max_mask_ratio=0.5,
+        max_dim=min(128, num_variates),
+        lr=lr,
+        weight_decay=weight_decay,
+        beta1=0.9,
+        beta2=0.98,
+        num_training_steps=num_training_steps,
+        num_warmup_steps=num_warmup_steps,
+    )
+    
+    # 根据finetune_pattern冻结相应层
+    if finetune_pattern == 'full':
+        pass  # 全参数微调，不冻结任何层
+    elif finetune_pattern == 'freeze_ffn':
+        for name, param in model.named_parameters():
+            if 'ffn' in name:
+                param.requires_grad = False
+    elif finetune_pattern == 'head_only':
+        for name, param in model.named_parameters():
+            if 'param_proj' not in name:
+                param.requires_grad = False
+    
+    # 打印可训练参数统计
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"\n参数统计:")
+    print(f"  总参数量: {total_params:,}")
+    print(f"  可训练参数: {trainable_params:,} ({100*trainable_params/total_params:.1f}%)")
+    
+    # 创建输出目录 - 使用简洁命名，方便evaluate
+    run_dir = output_dir / model_name
+    if run_dir.exists():
+        # 如果已存在，追加时间戳避免覆盖
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_dir = output_dir / f'{model_name}_{timestamp}'
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 保存预训练模型作为 zero-shot 基线 (用于评估对比)
+    print(f"\n保存预训练基线 (Zero-shot)...")
+    save_baseline_model(model, run_dir)
+    
+    # 获取数据变换 - 使用MoiraiPretrain的transform (支持通用格式)
+    transform = model.train_transform_map['default']()
+    
+    # 创建数据集
+    train_dataset = TimeSeriesDataset(
+        HuggingFaceDatasetIndexer(train_hf),
+        transform=transform,
+        dataset_weight=1.0,
+        sample_time_series=SampleTimeSeriesType.NONE,
+    )
+    
+    val_dataset = TimeSeriesDataset(
+        HuggingFaceDatasetIndexer(val_hf),
+        transform=transform,  # 验证集也用同样的transform
+        dataset_weight=1.0,
+        sample_time_series=SampleTimeSeriesType.NONE,
+    )
+    
+    # 创建DataLoader
+    train_loader = DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        batch_size_factor=2.0,
+        cycle=True,
+        num_batches_per_epoch=num_batches_per_epoch,
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=PackCollate(
+            max_length=512,
+            seq_fields=MoiraiPretrain.seq_fields,
+            pad_func_map=MoiraiPretrain.pad_func_map,
+        ),
+        drop_last=True,
+        pin_memory=True,
+        prefetch_factor=4 if num_workers > 0 else 2,
+    )
+    
+    val_loader = DataLoader(
+        dataset=val_dataset,
+        batch_size=batch_size,
+        batch_size_factor=2.0,
+        cycle=False,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=PackCollate(
+            max_length=512,
+            seq_fields=MoiraiPretrain.seq_fields,
+            pad_func_map=MoiraiPretrain.pad_func_map,
+        ),
+        drop_last=False,
+        pin_memory=True,
+    )
+    
+    # Callbacks
+    callbacks = [
+        LearningRateMonitor(logging_interval='step'),
+        ModelCheckpoint(
+            dirpath=run_dir / 'checkpoints',
+            filename='best-{epoch:02d}-{val_loss:.4f}',
+            monitor='val/PackedNLLLoss',
+            mode='min',
+            save_top_k=3,
+        ),
+        ModelCheckpoint(
+            dirpath=run_dir / 'checkpoints',
+            filename='last',
+            every_n_epochs=1,
+        ),
+        EarlyStopping(
+            monitor='val/PackedNLLLoss',
+            patience=patience,
+            mode='min',
+            verbose=True,
+        ),
+    ]
+    
+    # Loggers
+    tb_logger = TensorBoardLogger(save_dir=run_dir, name='tensorboard')
+    csv_logger = CSVLogger(save_dir=run_dir, name='csv_logs')
+    
+    # 设备检测
+    device_available = torch.cuda.is_available()
+    accelerator = 'gpu' if device_available else 'cpu'
+    devices_count = gpus if device_available else 1
+    precision = 'bf16-mixed' if device_available else 32
+    
+    # Trainer
+    trainer = L.Trainer(
+        max_epochs=epochs,
+        accelerator=accelerator,
+        devices=devices_count,
+        callbacks=callbacks,
+        logger=[tb_logger, csv_logger],
+        gradient_clip_val=1.0,
+        log_every_n_steps=50,
+        enable_progress_bar=True,
+        precision=precision,
+        accumulate_grad_batches=1,
+        val_check_interval=1.0,
+    )
+    
+    # 设备信息
+    if device_available:
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"\n设备: GPU - {gpu_name}")
+        print(f"  显存: {gpu_mem:.1f} GB")
+    else:
+        print(f"\n设备: CPU")
+    
+    print(f"\n输出目录: {run_dir}")
+    print(f"\n{'='*60}")
+    print("开始微调...")
+    print(f"{'='*60}\n")
+    
+    # 训练
+    trainer.fit(
+        model,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,
+        ckpt_path=resume,
+    )
+    
+    print(f"\n{'='*60}")
+    print("微调完成!")
+    print(f"{'='*60}")
+    print(f"Checkpoints: {run_dir / 'checkpoints'}")
+    
+    return run_dir
+
+
+# =============================================================================
 # 主程序入口
 # =============================================================================
 
 if __name__ == '__main__':
-
-    data_dir = Path(DATA_DIR)
-    output_dir = Path(OUTPUT_DIR)
-
-    print(f"\n运行模式: {RUN_MODE}")
+    
+    # 解析配置
+    mode = CONFIG['mode']
+    data_dir = Path(CONFIG['data_dir'])
+    output_dir = Path(CONFIG['output_dir'])
+    hw = CONFIG['hardware']
+    
+    print(f"\n运行模式: {mode}")
     print(f"数据目录: {data_dir}")
     print(f"输出目录: {output_dir}")
 
-    if RUN_MODE == 'build':
-        # 构建数据集
+    if mode == 'build':
         build_dataset(data_dir, data_dir / 'hf')
 
-    elif RUN_MODE == 'train':
-        # 训练模型
+    elif mode == 'train':
+        cfg = CONFIG['train']
         train(
             data_dir=data_dir,
             output_dir=output_dir,
-            epochs=EPOCHS,
-            batch_size=BATCH_SIZE,
-            lr=LEARNING_RATE,
-            d_model=D_MODEL,
-            num_layers=NUM_LAYERS,
-            num_workers=NUM_WORKERS,
-            gpus=GPUS,
-            resume=RESUME_FROM,
-            patience=PATIENCE,
+            model_name=cfg['model_name'],
+            epochs=cfg['epochs'],
+            batch_size=cfg['batch_size'],
+            lr=cfg['lr'],
+            d_model=cfg['d_model'],
+            num_layers=cfg['num_layers'],
+            num_workers=hw['num_workers'],
+            gpus=hw['gpus'],
+            resume=CONFIG['resume_from'],
+            patience=cfg['patience'],
         )
+    
+    elif mode == 'finetune':
+        cfg = CONFIG['finetune']
+        # 自动生成模型名: moirai_{size}_{pattern}
+        # 例如: moirai_base_full, moirai_small_freeze_ffn
+        model_name = cfg.get('model_name')
+        if model_name is None:
+            model_name = f"moirai_{cfg['pretrained']}_{cfg['pattern']}"
+        
+        finetune(
+            data_dir=data_dir,
+            output_dir=output_dir,
+            model_name=model_name,
+            pretrained_model=cfg['pretrained'],
+            finetune_pattern=cfg['pattern'],
+            epochs=cfg['epochs'],
+            batch_size=cfg['batch_size'],
+            lr=cfg['lr'],
+            weight_decay=cfg['weight_decay'],
+            num_workers=hw['num_workers'],
+            gpus=hw['gpus'],
+            resume=CONFIG['resume_from'],
+            patience=cfg['patience'],
+        )
+    
     else:
-        print(f"未知的运行模式: {RUN_MODE}")
-        print("请设置 RUN_MODE = 'build' 或 'train'")
+        print(f"未知的运行模式: {mode}")
+        print("请设置 CONFIG['mode'] = 'build' | 'train' | 'finetune'")

@@ -36,8 +36,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 # Configuration
 # =============================================================================
 
-DATA_DIR = Path('../data/buildingfm_processed')
-OUTPUT_DIR = Path('../outputs/baselines')
+DATA_DIR = Path('../data/buildingfm_processed_15min')
+OUTPUT_DIR = Path('../outputs/baselines_15min')
 
 # Variable groups to train (same as evaluation)
 TRAIN_GROUPS = {
@@ -48,11 +48,22 @@ TRAIN_GROUPS = {
     'IAQ': {'id_range': (98, 101), 'unit': 'ppm/ug'},
 }
 
-# Feature engineering
-# Note: Adjust lags based on sequence length (2880 = 2 days at 1min)
-LAG_STEPS = [1, 60, 360, 1440]  # 1min, 1hr, 6hr, 1day
+# =============================================================================
+# Frequency Configuration - ONLY CHANGE THIS!
+# =============================================================================
+DATA_FREQ = '15min'  # Options: '1min', '5min', '15min', '30min', '1H', etc.
+
+# Auto-calculated time steps (DO NOT modify manually)
+_freq_minutes = pd.Timedelta(DATA_FREQ).total_seconds() / 60
+STEPS_PER_HOUR = int(60 / _freq_minutes)
+STEPS_PER_DAY = int(24 * 60 / _freq_minutes)
+STEPS_PER_WEEK = int(7 * 24 * 60 / _freq_minutes)
+
+# Feature engineering (lag steps - auto-calculated)
+LAG_STEPS = [1, STEPS_PER_HOUR, STEPS_PER_HOUR * 6, STEPS_PER_DAY]  # 1step, 1hr, 6hr, 1day
 
 # XGBoost parameters
+# 自动检测设备: 如果有GPU则使用GPU加速
 XGBOOST_PARAMS = {
     'n_estimators': 100,
     'max_depth': 6,
@@ -61,6 +72,8 @@ XGBOOST_PARAMS = {
     'colsample_bytree': 0.8,
     'random_state': 42,
     'n_jobs': -1,
+    'tree_method': 'hist',  # 'hist' 支持CPU和GPU
+    'device': 'cuda' if __import__('torch').cuda.is_available() else 'cpu',
 }
 
 # Training settings
@@ -304,6 +317,16 @@ def main():
     print("=" * 60)
     print("BuildingFM Baseline Training (XGBoost)")
     print("=" * 60)
+    
+    # 检测设备
+    import torch
+    device_available = torch.cuda.is_available()
+    if device_available:
+        print(f"\n设备: GPU - {torch.cuda.get_device_name(0)}")
+        print(f"  XGBoost将使用GPU加速训练")
+    else:
+        print(f"\n设备: CPU")
+        print(f"  XGBoost将使用CPU训练")
     
     # Setup
     output_dir = OUTPUT_DIR
