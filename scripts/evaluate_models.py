@@ -95,9 +95,105 @@ MODEL_SIZES = ['small', 'base']
 # 微调策略
 FINETUNE_PATTERNS = ['full', 'freeze_ffn', 'head_only']
 
-# 自动生成所有模型目录
+# 自动生成所有模型目录 (基础命名，不含lr)
 def get_model_dir(size: str, pattern: str) -> Path:
     return MODEL_OUTPUT_DIR / f'moirai_{size}_{pattern}'
+
+
+def discover_all_models(output_dir: Path) -> Dict[str, List[Path]]:
+    """
+    自动发现所有 moirai_* 模型目录，按 size+pattern 分组。
+
+    Returns:
+        Dict mapping 'size_pattern' -> list of model directories
+        Example: {'small_freeze_ffn': [moirai_small_freeze_ffn, moirai_small_freeze_ffn_1e05, ...]}
+    """
+    discovered = {}
+
+    for model_dir in output_dir.glob('moirai_*'):
+        if not model_dir.is_dir():
+            continue
+
+        # 检查是否有checkpoint
+        ckpt_dir = model_dir / 'checkpoints'
+        if not ckpt_dir.exists():
+            continue
+
+        best_ckpts = list(ckpt_dir.glob('best-*.ckpt'))
+        if not best_ckpts:
+            continue
+
+        # 解析名称: moirai_{size}_{pattern}[_{lr}][_{timestamp}]
+        name_parts = model_dir.name.split('_')
+        if len(name_parts) < 3:
+            continue
+
+        size = name_parts[1]  # small or base
+
+        # 确定pattern (可能是复合词如 freeze_ffn 或 head_only)
+        pattern = None
+        for p in FINETUNE_PATTERNS:
+            p_parts = p.split('_')
+            if name_parts[2:2+len(p_parts)] == p_parts:
+                pattern = p
+                break
+
+        if pattern is None:
+            continue
+
+        key = f'{size}_{pattern}'
+        if key not in discovered:
+            discovered[key] = []
+        discovered[key].append(model_dir)
+
+    return discovered
+
+
+def find_best_model_for_group(model_dirs: List[Path]) -> Optional[Tuple[Path, float]]:
+    """
+    从同一 size+pattern 的多个模型中选择最佳的 (最低val_loss)。
+
+    Returns:
+        (best_model_dir, best_val_loss) or None
+    """
+    best_dir = None
+    best_loss = float('inf')
+
+    for model_dir in model_dirs:
+        # 尝试读取训练历史
+        history_sources = [
+            model_dir / 'csv_logs' / 'version_0' / 'metrics.csv',
+            model_dir / 'training_history.csv',
+        ]
+
+        val_loss = None
+        for history_file in history_sources:
+            if not history_file.exists():
+                continue
+
+            try:
+                df = pd.read_csv(history_file)
+
+                if 'val/PackedNLLLoss' in df.columns:
+                    val_df = df[df['val/PackedNLLLoss'].notna()]
+                    if len(val_df) > 0:
+                        val_loss = val_df['val/PackedNLLLoss'].min()
+                        break
+                elif 'val_loss' in df.columns:
+                    valid = df['val_loss'].dropna()
+                    if len(valid) > 0:
+                        val_loss = valid.min()
+                        break
+            except Exception:
+                continue
+
+        if val_loss is not None and val_loss < best_loss:
+            best_loss = val_loss
+            best_dir = model_dir
+
+    if best_dir is not None:
+        return (best_dir, best_loss)
+    return None
 
 # 显示名称映射 (用于图表)
 DISPLAY_NAMES = {
@@ -1906,36 +2002,79 @@ def main():
     else:
         print("  XGBoost model not found (skipping)")
     
-    # Load MOIRAI models: all sizes × all finetune patterns
-    # First load zero-shot baselines (one per size)
+    # Load MOIRAI models: auto-discover all experiments and select best for each size+pattern
+    print("\n  Auto-discovering MOIRAI models...")
+    discovered = discover_all_models(MODEL_OUTPUT_DIR)
+
+    if discovered:
+        print(f"  Found {sum(len(v) for v in discovered.values())} model directories in {len(discovered)} groups")
+        for key, dirs in discovered.items():
+            print(f"    {key}: {len(dirs)} experiments")
+    else:
+        print("  No MOIRAI models discovered!")
+
+    # First load zero-shot baselines (one per size) - try any available model's baseline
     for size in MODEL_SIZES:
-        # Use any pattern's baseline (they are identical)
-        baseline_path = get_model_dir(size, 'full') / 'baseline_untrained.pt'
+        baseline_path = None
+        # Try to find baseline from any pattern
+        for pattern in FINETUNE_PATTERNS:
+            key = f'{size}_{pattern}'
+            if key in discovered and discovered[key]:
+                candidate = discovered[key][0] / 'baseline_untrained.pt'
+                if candidate.exists():
+                    baseline_path = candidate
+                    break
+        # Fallback to default path
+        if baseline_path is None:
+            baseline_path = get_model_dir(size, 'full') / 'baseline_untrained.pt'
+
         if baseline_path.exists():
             display_name = f'{size.capitalize()} (Zero-shot)'
             print(f"  Loading {display_name}...")
             models[display_name] = load_model_from_baseline(baseline_path, device)
-    
-    # Load all finetuned models
+
+    # Load best finetuned model for each size+pattern combination
     for size in MODEL_SIZES:
         for pattern in FINETUNE_PATTERNS:
-            model_dir = get_model_dir(size, pattern)
-            ckpt_dir = model_dir / 'checkpoints'
-            
-            # Find best checkpoint (latest by modification time, skip first 2 epochs)
+            key = f'{size}_{pattern}'
+            display_name = DISPLAY_NAMES.get(key, f'{size.capitalize()}-{pattern}')
+
+            if key not in discovered or not discovered[key]:
+                print(f"  {display_name}: no experiments found (skipping)")
+                continue
+
+            # Find best model among all experiments for this size+pattern
+            best_result = find_best_model_for_group(discovered[key])
+
+            if best_result is None:
+                print(f"  {display_name}: no valid checkpoints found (skipping)")
+                continue
+
+            best_dir, best_loss = best_result
+            ckpt_dir = best_dir / 'checkpoints'
+
+            # Find best checkpoint (skip first 2 epochs to avoid early stopping artifacts)
             all_best = list(ckpt_dir.glob('best-*.ckpt'))
-            # Filter: epoch > 2 (filename: best-{epoch:02d}-{val_loss:.4f}.ckpt)
-            valid_ckpts = [p for p in all_best if int(p.stem.split('-')[1]) > 2]
+            valid_ckpts = []
+            for p in all_best:
+                try:
+                    epoch = int(p.stem.split('-')[1])
+                    if epoch > 2:
+                        valid_ckpts.append(p)
+                except (IndexError, ValueError):
+                    valid_ckpts.append(p)
+
+            if not valid_ckpts:
+                valid_ckpts = all_best  # Fallback to all if none pass filter
+
             best_ckpts = sorted(valid_ckpts, key=lambda p: p.stat().st_mtime, reverse=True)
             ckpt_path = best_ckpts[0] if best_ckpts else None
-            
+
             if ckpt_path and ckpt_path.exists():
-                display_name = DISPLAY_NAMES.get(f'{size}_{pattern}', f'{size}-{pattern}')
-                print(f"  Loading {display_name} from {ckpt_path.name}...")
+                print(f"  Loading {display_name} from {best_dir.name}/{ckpt_path.name} (val_loss={best_loss:.4f})...")
                 models[display_name] = load_model_from_checkpoint(ckpt_path, device)
             else:
-                display_name = DISPLAY_NAMES.get(f'{size}_{pattern}', f'{size}-{pattern}')
-                print(f"  {display_name} checkpoint not found (skipping)")
+                print(f"  {display_name}: checkpoint file not found (skipping)")
     
     # Filter out None models for counting
     loaded_models = {k: v for k, v in models.items() if v is not None}

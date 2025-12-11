@@ -40,31 +40,37 @@ CONFIG = {
     # -------------------------------------------------------------------------
     # 微调配置 (mode='finetune' 时使用) - 推荐!
     # -------------------------------------------------------------------------
+    #
+    # 关键研究发现 (来自论文):
+    # - Multi-Scale Finetuning (arxiv.org/html/2506.14087): lr=5e-6 ~ 5e-7
+    # - Less is More (arxiv.org/html/2505.23195v1): MOIRAI微调建议1-3 epoch
+    # - Foundation model微调需要比预训练低100-1000倍的学习率
+    #
     'finetune': {
         # 预训练模型: 'small' | 'base' | 'large'
-        # small: 14M参数, 4-6GB显存, 快速实验
-        # base:  80M参数, 8-12GB显存, 推荐RTX 5070
+        # small: 14M参数, 4-6GB显存, 快速实验 (推荐先用small验证)
+        # base:  91M参数, 8-12GB显存, 生产环境推荐
         # large: 300M参数, 16GB+显存, 追求极致
-        'pretrained': 'base',
-        
+        'pretrained': 'small',  # 改为small，先快速验证
+
         # 微调策略: 'full' | 'freeze_ffn' | 'head_only'
-        # full:       全参数微调 (数据量>10k)
-        # freeze_ffn: 冻结FFN层 (数据量1k-10k, 推荐默认)
-        # head_only:  只训练输出头 (数据量<1k, 防过拟合)
+        # head_only:  只训练输出头 (最快，验证训练正常)
+        # freeze_ffn: 冻结FFN层 (推荐起点，平衡效果和稳定性)
+        # full:       全参数微调 (效果最好但易过拟合)
         'pattern': 'freeze_ffn',
-        
+
         # 输出目录命名: 自动生成为 moirai_{pretrained}_{pattern}
         # 例如: moirai_base_full, moirai_small_freeze_ffn
         # 设为 None 则自动生成，也可手动指定如 'my_custom_name'
         'model_name': None,
-        
-        # 超参数 - 比从零训练更保守!
-        'epochs': 50,          # 微调3-20轮通常足够
-        'lr': 5e-5,            # 学习率: 1e-6 ~ 1e-5 (比预训练低!)
-        'batch_size': 32,      # 批大小
-        'patience': 15,         # Early stopping
-        'weight_decay': 0.01,  # 权重衰减
-        'warmup_steps': 100,   # Warmup步数 (微调少一些)
+
+        # ===== 关键超参数 (已按论文研究调整) =====
+        'epochs': 10,          # 减少! Foundation model容易过拟合 (原50->10)
+        'lr': 1e-5,            # 降低! 比预训练低100-1000倍 (原5e-5->1e-5)
+        'batch_size': 64,      # small可用64, base用32
+        'patience': 5,         # 与epochs匹配 (原15->5)
+        'weight_decay': 0.1,   # 与预训练保持一致! (原0.01->0.1)
+        'warmup_steps': 100,   # 约占总steps的5-10%
     },
     
     # -------------------------------------------------------------------------
@@ -652,6 +658,7 @@ def finetune(
     gpus: int = 1,
     resume: Optional[str] = None,
     patience: int = 5,
+    warmup_steps: Optional[int] = None,
 ):
     """微调预训练MOIRAI模型"""
     
@@ -700,7 +707,11 @@ def finetune(
     # 计算训练步数
     num_batches_per_epoch = max(10, len(train_hf) // batch_size)
     num_training_steps = epochs * num_batches_per_epoch
-    num_warmup_steps = min(100, num_training_steps // 10)  # 微调warmup更少
+    # 使用指定的warmup_steps，或者默认计算
+    if warmup_steps is not None:
+        num_warmup_steps = warmup_steps
+    else:
+        num_warmup_steps = min(100, num_training_steps // 10)  # 微调warmup更少
     
     print(f"\n微调配置:")
     print(f"  Epochs: {epochs}")
@@ -947,6 +958,7 @@ if __name__ == '__main__':
             gpus=hw['gpus'],
             resume=CONFIG['resume_from'],
             patience=cfg['patience'],
+            warmup_steps=cfg.get('warmup_steps'),
         )
     
     else:
