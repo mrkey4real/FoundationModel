@@ -12,7 +12,10 @@
       "Bash(powershell.exe -Command \"chcp 65001; & ''C:\\Users\\qizixuan\\.conda\\envs\\fm\\python.exe'' -c \"\"\nimport datasets\nimport numpy as np\n\n# Load test data\ntest_hf = datasets.load_from_disk(''E:/MOIRAI/data/buildingfm_processed_15min/hf/buildingfm_test'')\nprint(f''Test dataset size: {len(test_hf)}'')\nprint(f''Sample keys: {test_hf[0].keys()}'')\n\ntarget = np.array(test_hf[0][''target''])\nprint(f''Target shape: {target.shape}'')\nprint(f''Target dtype: {target.dtype}'')\n\n# Check NaN ratio\nnan_ratio = np.isnan(target).sum() / target.size\nprint(f''NaN ratio: {nan_ratio:.2%}'')\n\n# Check value ranges for some variables\nfor var_id in [0, 10, 50]:\n    if var_id < target.shape[0]:\n        var_data = target[var_id]\n        valid = var_data[~np.isnan(var_data)]\n        if len(valid) > 0:\n            print(f''Var {var_id}: min={valid.min():.2f}, max={valid.max():.2f}, mean={valid.mean():.2f}, std={valid.std():.2f}'')\n\"\"\")",
       "Bash(powershell.exe -Command:*)",
       "Bash(find:*)",
-      "Bash(dir /s /b \"E:\\MOIRAI\\outputs\\buildingfm_15min\\*.csv\")"
+      "Bash(dir /s /b \"E:\\MOIRAI\\outputs\\buildingfm_15min\\*.csv\")",
+      "Bash(C:ProgramDataanaconda3envsfmpython.exe -c \"import scripts.evaluate_models; print(''Syntax OK'')\")",
+      "Bash(python:*)",
+      "Bash(C:ProgramDataanaconda3envsfmpython.exe -c \"import uni2ts.transform; print(uni2ts.transform.__file__)\")"
     ],
     "deny": [],
     "ask": []

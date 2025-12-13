@@ -278,7 +278,7 @@ assert CONTEXT_LENGTH + PREDICTION_LENGTH <= SAMPLE_WINDOW_SIZE, \
     f"CONTEXT({CONTEXT_LENGTH}) + PREDICTION({PREDICTION_LENGTH}) > WINDOW({SAMPLE_WINDOW_SIZE})!"
 
 # PATCH_SIZE: target ~8 hours per patch for good daily pattern capture
-PATCH_SIZE = 8
+PATCH_SIZE = 128
 NUM_SAMPLES = 20            # Reduced from 50 - still good for CRPS/MSIS
 SEASONAL_PERIOD = STEPS_PER_DAY  # Daily seasonality (auto-calculated)
 
@@ -1495,39 +1495,24 @@ def task2_fill_in_blank(
     device: str
 ) -> Dict[str, Dict[str, float]]:
     """
-    Task 2: Fill-in-the-Blank (Cross-Variate Inference).
+    Task 2: Virtual Sensor / Fill-in-the-Blank (MULTI-VARIATE).
 
-    与训练对应：
-    - 训练: 随机选择部分 variates，每个 mask 15-50% 的时间步（任意位置）
-    - 评估: 选择 ODU Power variates，mask 中间 30% 的时间步
+    CRITICAL: Input ALL variates together, matching training!
+    - All variates visible except target vars
+    - Target vars (ODU Power) masked in middle 30%
 
-    Given:
-    - Weather variables (boundary conditions) - 100% observed
-    - Zone temperatures (end results) - 100% observed
-    - ODU Power (target) - 前后各 35% observed，中间 30% masked
+    This tests cross-variate inference: given all other sensors, predict target.
 
-    Predict:
-    - ODU Power 的中间 30% 时间步
-
-    这样评估与训练的 masking 模式一致：
-    - 训练覆盖了 "部分 variates 的部分时间步 masked" 的情况
-    - 评估是这个模式的一个特定实例
-
-    This validates whether the model learned: Weather → HVAC Power → Indoor Conditions
-
-    NOTE: Only MOIRAI can do this task. XGBoost cannot handle arbitrary masking.
+    NOTE: Only MOIRAI can do this task. Baselines cannot handle arbitrary masking.
     """
-    # Mask configuration - aligned with training (15-50% mask ratio)
-    MASK_START_RATIO = 0.35  # Start masking at 35% of the window
-    MASK_END_RATIO = 0.65    # End masking at 65% of the window (30% masked)
-
     results = {name: [] for name in moirai_models.keys()}
 
     for idx in range(min(len(test_hf), max_samples)):
         sample = test_hf[idx]
-        target = np.array(sample['target'])
+        target = np.array(sample['target'])  # (num_variates, time_steps)
+        num_variates = target.shape[0]
 
-        # Use shorter window for fill-in-blank (no future prediction)
+        # Use context length window (no future prediction for virtual sensor)
         total_length = CONTEXT_LENGTH
 
         if target.shape[1] < total_length:
@@ -1546,48 +1531,62 @@ def task2_fill_in_blank(
                     best_var = var
                     best_start = start
 
+        # Extract window for ALL variates
         full_data = target[:, best_start:best_start + total_length]
 
-        # Get ground truth for masked region only
-        mask_start_idx = int(total_length * MASK_START_RATIO)
-        mask_end_idx = int(total_length * MASK_END_RATIO)
-        true_odu = {var_id: full_data[var_id, mask_start_idx:mask_end_idx] for var_id in ODU_POWER_VAR_IDS}
+        # Ground truth for masked region (middle 30%)
+        mask_start_idx = int(total_length * 0.35)
+        mask_end_idx = int(total_length * 0.65)
+        true_odu = {var_id: full_data[var_id, mask_start_idx:mask_end_idx]
+                   for var_id in ODU_POWER_VAR_IDS if var_id < num_variates}
 
         # Evaluate each MOIRAI model
         for model_name, module in moirai_models.items():
             if module is None:
                 continue
 
-            predictions = predict_fill_in_blank(
-                module, full_data,
-                observed_var_ids=WEATHER_VAR_IDS + ZONE_TEMP_VAR_IDS,
-                masked_var_ids=ODU_POWER_VAR_IDS,
-                context_length=total_length,
-                prediction_length=0,  # No future prediction, just fill-in
-                patch_size=PATCH_SIZE,
-                num_samples=NUM_SAMPLES,
-                device=device,
-                mask_start_ratio=MASK_START_RATIO,
-                mask_end_ratio=MASK_END_RATIO
-            )
+            try:
+                # Input ALL variates, mask only target vars
+                predictions = predict_multivariate(
+                    module,
+                    full_data,
+                    context_length=total_length,
+                    prediction_length=0,  # No future prediction
+                    weather_var_ids=WEATHER_VAR_IDS,
+                    target_var_ids=ODU_POWER_VAR_IDS,
+                    task_type='virtual_sensor',
+                    patch_size=PATCH_SIZE,
+                    num_samples=NUM_SAMPLES,
+                    device=device
+                )
 
-            # Calculate metrics for masked variables
-            for var_id in ODU_POWER_VAR_IDS:
-                if var_id not in predictions:
-                    continue
+                # Calculate metrics for masked variables
+                for var_id in ODU_POWER_VAR_IDS:
+                    if var_id not in predictions or var_id not in true_odu:
+                        continue
 
-                point_pred, samples, _, _ = predictions[var_id]
-                y_true = true_odu[var_id]
-                
-                if np.isnan(point_pred).all():
-                    continue
-                
-                metrics = calculate_all_metrics(y_true, point_pred, samples)
-                results[model_name].append(metrics)
-            
+                    result = predictions[var_id]
+                    # virtual_sensor returns (point_pred, samples, mask_start, mask_end)
+                    if len(result) == 4:
+                        point_pred, samples, _, _ = result
+                    else:
+                        point_pred, samples = result
+
+                    y_true = true_odu[var_id]
+
+                    if np.isnan(point_pred).all():
+                        continue
+
+                    metrics = calculate_all_metrics(y_true, point_pred, samples)
+                    results[model_name].append(metrics)
+
+            except Exception as e:
+                print(f"  Warning: {model_name} failed on sample {idx}: {e}")
+                continue
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-    
+
     # Aggregate
     aggregated = {}
     for model_name, metric_list in results.items():
@@ -1598,7 +1597,7 @@ def task2_fill_in_blank(
             for key in metric_list[0].keys():
                 values = [m[key] for m in metric_list if not np.isnan(m[key])]
                 aggregated[model_name][key] = np.mean(values) if values else np.nan
-    
+
     return aggregated
 
 
@@ -1610,110 +1609,144 @@ def task3_ood_stress_test(
     device: str
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     """
-    Task 3: OOD Stress Test.
-    
-    Filter test samples by extreme conditions:
-    - High temperature: outdoor temp > upper quartile
-    - Low temperature: outdoor temp < lower quartile  
-    - High load: main power > median (HVAC working hard)
-    
-    Run standard forecasting on these filtered samples to evaluate generalization.
+    Task 3: OOD Stress Test (MULTI-VARIATE).
+
+    CRITICAL: Input ALL variates together, matching training!
+    Filter test samples by extreme conditions and run multi-variate forecasting.
     """
     results = {
         condition: {name: [] for name in models.keys()}
         for condition in ['high_temp', 'low_temp', 'high_load']
     }
-    
+
     seasonal_naive = SeasonalNaiveModel()
-    
+
     # Variable indices for condition detection
     outdoor_temp_id = 0   # First weather variable is outdoor temperature
     main_power_id = 10    # Main power
-    
+
     for idx in range(min(len(test_hf), max_samples)):
         sample = test_hf[idx]
-        target = np.array(sample['target'])
-        
-        # Check each variable for evaluation
+        target = np.array(sample['target'])  # (num_variates, time_steps)
+        num_variates = target.shape[0]
+
+        # Find best window using first target variable
+        first_var = var_ids[0] if var_ids[0] < num_variates else 10
+        var_data = target[first_var, :]
+        start_idx = find_best_window(var_data, CONTEXT_LENGTH, PREDICTION_LENGTH)
+        end_idx = start_idx + CONTEXT_LENGTH + PREDICTION_LENGTH
+
+        if end_idx > target.shape[1]:
+            continue
+
+        # Extract window for ALL variates
+        full_data = target[:, start_idx:end_idx]
+
+        # Determine which OOD conditions apply to this window
+        applicable_conditions = []
+
+        # Check outdoor temperature
+        if outdoor_temp_id < num_variates:
+            outdoor_temp = full_data[outdoor_temp_id, :]
+            temp_mean = np.nanmean(outdoor_temp)
+            if not np.isnan(temp_mean):
+                if temp_mean > OOD_THRESHOLDS['high_temp']:
+                    applicable_conditions.append('high_temp')
+                elif temp_mean < OOD_THRESHOLDS['low_temp']:
+                    applicable_conditions.append('low_temp')
+
+        # Check main power (high HVAC load)
+        if main_power_id < num_variates:
+            power_vals = full_data[main_power_id, :]
+            power_mean = np.nanmean(power_vals)
+            power_max = np.nanmax(target[main_power_id, :])
+            if not np.isnan(power_mean) and power_max > 0:
+                if power_mean / power_max > OOD_THRESHOLDS['high_load']:
+                    applicable_conditions.append('high_load')
+
+        if not applicable_conditions:
+            continue
+
+        # Evaluate baselines per-variable
         for var_id in var_ids:
-            if var_id >= target.shape[0]:
+            if var_id >= num_variates:
                 continue
-            
-            var_data = target[var_id, :]
-            start_idx = find_best_window(var_data, CONTEXT_LENGTH, PREDICTION_LENGTH)
-            end_idx = start_idx + CONTEXT_LENGTH + PREDICTION_LENGTH
-            
-            if end_idx > len(var_data):
-                continue
-            
-            full_window = var_data[start_idx:end_idx]
-            context = full_window[:CONTEXT_LENGTH]
-            future_true = full_window[CONTEXT_LENGTH:]
-            
+
+            var_window = full_data[var_id, :]
+            context = var_window[:CONTEXT_LENGTH]
+            future_true = var_window[CONTEXT_LENGTH:]
+
             if np.isnan(context).sum() > CONTEXT_LENGTH * 0.5:
                 continue
             if np.all(np.isnan(future_true)):
                 continue
-            
-            # Determine which OOD conditions apply to this window
-            applicable_conditions = []
-            
-            # Check outdoor temperature
-            if outdoor_temp_id < target.shape[0]:
-                outdoor_temp = target[outdoor_temp_id, start_idx:end_idx]
-                temp_mean = np.nanmean(outdoor_temp)
-                if not np.isnan(temp_mean):
-                    if temp_mean > OOD_THRESHOLDS['high_temp']:
-                        applicable_conditions.append('high_temp')
-                    elif temp_mean < OOD_THRESHOLDS['low_temp']:
-                        applicable_conditions.append('low_temp')
-            
-            # Check main power (high HVAC load)
-            if main_power_id < target.shape[0]:
-                power_vals = target[main_power_id, start_idx:end_idx]
-                power_mean = np.nanmean(power_vals)
-                power_max = np.nanmax(target[main_power_id, :])
-                if not np.isnan(power_mean) and power_max > 0:
-                    if power_mean / power_max > OOD_THRESHOLDS['high_load']:
-                        applicable_conditions.append('high_load')
-            
-            if not applicable_conditions:
-                continue
-            
-            # Get seasonal naive error
+
             sn_pred, _ = seasonal_naive.predict(context, PREDICTION_LENGTH)
             seasonal_mae = np.nanmean(np.abs(future_true - sn_pred))
             if np.isnan(seasonal_mae) or seasonal_mae < 1e-8:
                 seasonal_mae = 1.0
-            
-            # Evaluate models on this OOD sample
-            for model_name, model in models.items():
-                if model is None:
-                    continue
-                
-                if model_name == 'Seasonal Naive':
-                    point_pred, samples = sn_pred, None
-                elif model_name == 'XGBoost':
-                    point_pred, samples = model.predict(context, PREDICTION_LENGTH)
-                else:
-                    # MOIRAI models - pass var_id for correct variate embedding
-                    point_pred, samples = predict_moirai(
-                        model, full_window, CONTEXT_LENGTH, PREDICTION_LENGTH,
-                        PATCH_SIZE, NUM_SAMPLES, device, var_id=var_id
-                    )
 
-                if np.isnan(point_pred).all() or np.isinf(point_pred).any():
-                    continue
-
-                metrics = calculate_all_metrics(future_true, point_pred, samples, seasonal_mae)
-
-                # Add to all applicable conditions
+            # Seasonal Naive
+            if 'Seasonal Naive' in models and models['Seasonal Naive'] is not None:
+                metrics = calculate_all_metrics(future_true, sn_pred, None, seasonal_mae)
                 for condition in applicable_conditions:
-                    results[condition][model_name].append(metrics)
-            
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-    
+                    results[condition]['Seasonal Naive'].append(metrics)
+
+            # XGBoost
+            if 'XGBoost' in models and models['XGBoost'] is not None:
+                xgb_pred, _ = models['XGBoost'].predict(context, PREDICTION_LENGTH)
+                if not (np.isnan(xgb_pred).all() or np.isinf(xgb_pred).any()):
+                    metrics = calculate_all_metrics(future_true, xgb_pred, None, seasonal_mae)
+                    for condition in applicable_conditions:
+                        results[condition]['XGBoost'].append(metrics)
+
+        # MOIRAI models: use multi-variate prediction
+        moirai_models = {k: v for k, v in models.items()
+                        if k not in ['Seasonal Naive', 'XGBoost'] and v is not None}
+
+        for model_name, module in moirai_models.items():
+            try:
+                predictions = predict_multivariate(
+                    module,
+                    full_data,
+                    context_length=CONTEXT_LENGTH,
+                    prediction_length=PREDICTION_LENGTH,
+                    weather_var_ids=WEATHER_VAR_IDS,
+                    target_var_ids=var_ids,
+                    task_type='forecast',
+                    patch_size=PATCH_SIZE,
+                    num_samples=NUM_SAMPLES,
+                    device=device
+                )
+
+                for var_id in var_ids:
+                    if var_id not in predictions:
+                        continue
+
+                    point_pred, samples = predictions[var_id]
+                    future_true = full_data[var_id, CONTEXT_LENGTH:]
+                    context = full_data[var_id, :CONTEXT_LENGTH]
+
+                    if np.all(np.isnan(future_true)):
+                        continue
+
+                    sn_pred, _ = seasonal_naive.predict(context, PREDICTION_LENGTH)
+                    seasonal_mae = np.nanmean(np.abs(future_true - sn_pred))
+                    if np.isnan(seasonal_mae) or seasonal_mae < 1e-8:
+                        seasonal_mae = 1.0
+
+                    if not (np.isnan(point_pred).all() or np.isinf(point_pred).any()):
+                        metrics = calculate_all_metrics(future_true, point_pred, samples, seasonal_mae)
+                        for condition in applicable_conditions:
+                            results[condition][model_name].append(metrics)
+
+            except Exception as e:
+                print(f"  Warning: {model_name} failed on sample {idx}: {e}")
+                continue
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     # Aggregate
     aggregated = {}
     for condition, condition_results in results.items():
@@ -1726,7 +1759,7 @@ def task3_ood_stress_test(
                 for key in metric_list[0].keys():
                     values = [m[key] for m in metric_list if not np.isnan(m[key])]
                     aggregated[condition][model_name][key] = np.mean(values) if values else np.nan
-    
+
     return aggregated
 
 

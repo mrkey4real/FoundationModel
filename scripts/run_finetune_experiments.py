@@ -720,7 +720,7 @@ def print_summary(df: pd.DataFrame):
 
 def main():
     parser = argparse.ArgumentParser(description='Run MOIRAI finetuning experiments')
-    parser.add_argument('--only', choices=['small'], help='Only run experiments for this model size')
+    parser.add_argument('--only', choices=['small','base'], help='Only run experiments for this model size')
     parser.add_argument('--resume', action='store_true', help='Skip completed experiments')
     parser.add_argument('--list', action='store_true', help='List all experiments and exit')
     parser.add_argument('--dry-run', action='store_true', help='Show what would be run without executing')
