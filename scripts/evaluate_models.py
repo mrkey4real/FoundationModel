@@ -31,6 +31,7 @@ Usage:
     python scripts/evaluate_models.py
 """
 
+import argparse
 import json
 import os
 import sys
@@ -259,28 +260,30 @@ STEPS_PER_WEEK = int(7 * 24 * 60 / _freq_minutes)
 # =============================================================================
 # Window Configuration - MUST ALIGN WITH prepare_buildingfm_data.py!
 # =============================================================================
-# prepare_buildingfm_data.py: window_size = 96 * 14 = 1344 (14 days)
+# prepare_buildingfm_data.py: WINDOW_DAYS = 3, window_size = 96 * 3 = 288 (3 days)
 # CONSTRAINT: CONTEXT_LENGTH + PREDICTION_LENGTH <= window_size
-SAMPLE_WINDOW_SIZE = STEPS_PER_DAY * 14  # Must match prepare_buildingfm_data.py
+SAMPLE_WINDOW_SIZE = STEPS_PER_DAY * 3  # Must match prepare_buildingfm_data.py
 
 # Prediction settings (expressed in human-readable units)
-CONTEXT_DAYS = 11           # 11 days of history
-PREDICTION_DAYS = 3         # 3 days forecast horizon
-CONTEXT_LENGTH = CONTEXT_DAYS * STEPS_PER_DAY      # 11 × 96 = 1056
-PREDICTION_LENGTH = PREDICTION_DAYS * STEPS_PER_DAY  # 3 × 96 = 288
-# Total: 1056 + 288 = 1344 <= 1344 ✓
+# 设计理由:
+# - 训练窗口为3天，评估窗口需要匹配
+# - 2天context + 1天prediction = 3天，刚好匹配训练窗口
+CONTEXT_DAYS = 2            # 2 days of history (192 steps @ 15min)
+PREDICTION_DAYS = 1         # 1 day forecast horizon (96 steps @ 15min)
+CONTEXT_LENGTH = CONTEXT_DAYS * STEPS_PER_DAY
+PREDICTION_LENGTH = PREDICTION_DAYS * STEPS_PER_DAY
 
 # Validation: ensure we don't exceed sample window
 assert CONTEXT_LENGTH + PREDICTION_LENGTH <= SAMPLE_WINDOW_SIZE, \
     f"CONTEXT({CONTEXT_LENGTH}) + PREDICTION({PREDICTION_LENGTH}) > WINDOW({SAMPLE_WINDOW_SIZE})!"
 
 # PATCH_SIZE: target ~8 hours per patch for good daily pattern capture
-PATCH_SIZE = max(8, STEPS_PER_HOUR * 8)  # 8 hours worth of steps
-NUM_SAMPLES = 50            # Number of samples for probabilistic prediction
+PATCH_SIZE = 8
+NUM_SAMPLES = 20            # Reduced from 50 - still good for CRPS/MSIS
 SEASONAL_PERIOD = STEPS_PER_DAY  # Daily seasonality (auto-calculated)
 
 # Evaluation settings
-MAX_EVAL_SAMPLES = 20       # Number of test samples to evaluate
+MAX_EVAL_SAMPLES = 30        # Reduced from 100 - faster evaluation
 CONFIDENCE_LEVEL = 0.95     # For MSIS calculation
 
 # Variable groups from metadata
@@ -351,44 +354,48 @@ def calculate_crps(
     samples: np.ndarray
 ) -> float:
     """
-    Continuous Ranked Probability Score.
-    
+    Continuous Ranked Probability Score (Vectorized).
+
     CRPS measures the integral of squared difference between predicted CDF
     and empirical CDF (step function at observed value).
-    
+
     For samples, CRPS = E[|X - y|] - 0.5 * E[|X - X'|]
     where X, X' are independent samples from the forecast distribution.
-    
+
     Properties:
         - Proper scoring rule (optimized by true distribution)
         - Rewards sharp forecasts that cover truth
         - Unit is same as target variable
-    
+
     Args:
         y_true: (T,) ground truth values
         samples: (N, T) samples from predictive distribution
     """
     y_true = y_true.flatten()
     N, T = samples.shape
-    
+
     mask = ~np.isnan(y_true)
     y_true = y_true[mask]
     samples = samples[:, mask]
-    
+
     if len(y_true) < 10:
         return np.nan
-    
+
     # E[|X - y|]: mean absolute error of samples to truth
     mae_term = np.mean(np.abs(samples - y_true))
-    
-    # E[|X - X'|]: expected difference between pairs of samples
-    # Use Monte Carlo approximation: compare each sample with all others
-    diff_term = 0.0
-    for i in range(N):
-        for j in range(i + 1, N):
-            diff_term += np.mean(np.abs(samples[i] - samples[j]))
-    diff_term = 2.0 * diff_term / (N * (N - 1)) if N > 1 else 0.0
-    
+
+    # E[|X - X'|]: Vectorized computation (O(N) instead of O(N²))
+    # Use the identity: E[|X - X'|] = 2 * E[|X - median(X)|] for symmetric distributions
+    # Or use sorted samples method: E[|X - X'|] = 2 * sum((2i - N - 1) * X_sorted[i]) / (N * (N-1))
+    if N > 1:
+        # Sort samples along sample axis, then use vectorized formula
+        sorted_samples = np.sort(samples, axis=0)  # (N, T)
+        # Weights: (2*i - N - 1) / (N * (N-1)) for i in 0..N-1
+        weights = (2 * np.arange(N) - N + 1) / (N * (N - 1))
+        diff_term = 2 * np.mean(np.sum(weights[:, None] * sorted_samples, axis=0))
+    else:
+        diff_term = 0.0
+
     crps = mae_term - 0.5 * diff_term
     return crps
 
@@ -793,19 +800,23 @@ def prepare_native_input(
     prediction_length: int,
     patch_size: int,
     max_patch_size: int = 128,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    var_id: int = 0
 ) -> Tuple[torch.Tensor, ...]:
     """
     Prepare input tensors in the same format as MoiraiPretrain training.
-    
+
     This creates a single-variate sequence with:
     - Context window: observed data (with actual values)
     - Prediction window: actual future values (but masked for prediction)
-    
+
     The key is that we provide the FULL data (context + future), but mark
     the future region with prediction_mask=True and observed_mask=False.
     This allows the scaler to compute loc/scale from the context correctly.
-    
+
+    Args:
+        var_id: The schema ID of the variable (for variate embedding consistency with training)
+
     Returns tensors matching MoiraiModule.forward() signature.
     """
     total_length = context_length + prediction_length
@@ -846,9 +857,9 @@ def prepare_native_input(
     
     # time_id: sequential from 0
     time_id = np.arange(num_patches, dtype=np.int64).reshape(1, -1)
-    
-    # variate_id: 0 for all (single variate)
-    variate_id = np.zeros((1, num_patches), dtype=np.int64)
+
+    # variate_id: Use actual schema ID for consistency with training (fixed variate IDs)
+    variate_id = np.full((1, num_patches), var_id, dtype=np.int64)
     
     # prediction_mask: 0 for context, 1 for prediction
     prediction_mask = np.zeros((1, num_patches), dtype=bool)
@@ -876,25 +887,27 @@ def predict_moirai(
     prediction_length: int,
     patch_size: int = PATCH_SIZE,
     num_samples: int = NUM_SAMPLES,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    var_id: int = 0
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Make prediction using native MoiraiModule interface.
     Same data format as training.
-    
+
     Args:
         var_data: Full window data (context_length + prediction_length)
         context_length: Number of timesteps in context
         prediction_length: Number of timesteps to predict
-    
+        var_id: Schema ID of the variable (for variate embedding consistency)
+
     Returns:
         point_pred: Median of samples (official MOIRAI point estimate)
         samples: (num_samples, prediction_length) for probabilistic metrics
     """
     max_patch_size = max(module.patch_sizes)
-    
+
     target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size_tensor = \
-        prepare_native_input(var_data, context_length, prediction_length, patch_size, max_patch_size, device)
+        prepare_native_input(var_data, context_length, prediction_length, patch_size, max_patch_size, device, var_id)
     
     module = module.to(device)
     module.eval()
@@ -926,35 +939,49 @@ def predict_moirai(
     return pred_median, pred_samples_np
 
 
-def prepare_fill_in_blank_input(
+def prepare_multivariate_input(
     full_data: np.ndarray,
-    observed_var_ids: List[int],
-    masked_var_ids: List[int],
     context_length: int,
     prediction_length: int,
     patch_size: int,
     max_patch_size: int,
-    device: str
+    device: str,
+    weather_var_ids: List[int],
+    target_var_ids: List[int],
+    task_type: str = 'forecast'
 ) -> Tuple[torch.Tensor, ...]:
     """
-    Prepare input for fill-in-the-blank task.
-    
-    In this task:
-    - observed_var_ids: Variables that are fully observed (e.g., weather + zone temps)
-    - masked_var_ids: Variables to be predicted in the middle (e.g., ODU power)
-    
-    This tests whether the model learned causal chains: Weather → ODU → Indoor
+    Unified multi-variate input preparation - ALL variates input, mask differs by task.
+
+    This matches training where ALL variates are input together!
+
+    Args:
+        full_data: (num_variates, time_steps) - ALL variates
+        context_length: Number of historical timesteps
+        prediction_length: Number of future timesteps (for forecast task)
+        weather_var_ids: Weather variables (0-7) - future is known in forecast
+        target_var_ids: Variables we want to evaluate/predict
+        task_type:
+            - 'forecast': Weather future visible, all other vars future masked
+            - 'virtual_sensor': Target vars masked entirely, others fully visible
+
+    Mask strategy:
+        - forecast: history all visible, future masked except weather
+        - virtual_sensor: target vars masked for middle 30% (like training)
     """
+    num_variates = full_data.shape[0]
     total_length = context_length + prediction_length
-    num_vars = len(observed_var_ids) + len(masked_var_ids)
-    
+
     # Calculate patches
     num_patches_per_var = (total_length + patch_size - 1) // patch_size
     padded_len = num_patches_per_var * patch_size
     pad_amount = padded_len - total_length if padded_len > total_length else 0
-    
-    total_patches = num_patches_per_var * num_vars
-    
+
+    # Context boundary in patches
+    context_patches = (context_length + pad_amount + patch_size - 1) // patch_size
+
+    total_patches = num_patches_per_var * num_variates
+
     # Initialize tensors
     target = np.zeros((1, total_patches, max_patch_size), dtype=np.float32)
     observed_mask = np.zeros((1, total_patches, max_patch_size), dtype=bool)
@@ -963,55 +990,63 @@ def prepare_fill_in_blank_input(
     variate_id = np.zeros((1, total_patches), dtype=np.int64)
     prediction_mask = np.zeros((1, total_patches), dtype=bool)
     patch_size_tensor = np.full((1, total_patches), patch_size, dtype=np.int64)
-    
+
+    # For virtual_sensor task: mask middle 30% of target vars (like training)
+    vs_mask_start = int(num_patches_per_var * 0.35)
+    vs_mask_end = int(num_patches_per_var * 0.65)
+
     patch_idx = 0
-    
-    # Process observed variables (fully visible)
-    for var_idx, var_id in enumerate(observed_var_ids):
+
+    # Process ALL variates
+    for var_id in range(num_variates):
         var_data = full_data[var_id, :total_length].astype(np.float32)
         nan_mask = np.isnan(var_data)
         var_data_clean = np.nan_to_num(var_data, nan=0.0)
-        
+
         if pad_amount > 0:
             var_data_clean = np.concatenate([np.zeros(pad_amount, dtype=np.float32), var_data_clean])
             nan_mask = np.concatenate([np.ones(pad_amount, dtype=bool), nan_mask])
-        
+
         for p in range(num_patches_per_var):
             start_idx = p * patch_size
             end_idx = start_idx + patch_size
-            
+
             target[0, patch_idx, :patch_size] = var_data_clean[start_idx:end_idx]
-            observed_mask[0, patch_idx, :patch_size] = ~nan_mask[start_idx:end_idx]
             time_id[0, patch_idx] = p
-            variate_id[0, patch_idx] = var_idx
-            prediction_mask[0, patch_idx] = False  # Observed
-            
+            variate_id[0, patch_idx] = var_id
+
+            # Determine mask based on task type and variable type
+            if task_type == 'forecast':
+                # Forecast: history visible, future masked (except weather)
+                if p < context_patches:
+                    # History: all visible
+                    observed_mask[0, patch_idx, :patch_size] = ~nan_mask[start_idx:end_idx]
+                    prediction_mask[0, patch_idx] = False
+                else:
+                    # Future: weather visible, others masked
+                    if var_id in weather_var_ids:
+                        observed_mask[0, patch_idx, :patch_size] = ~nan_mask[start_idx:end_idx]
+                        prediction_mask[0, patch_idx] = False
+                    else:
+                        observed_mask[0, patch_idx, :patch_size] = False
+                        prediction_mask[0, patch_idx] = True
+
+            elif task_type == 'virtual_sensor':
+                # Virtual sensor: target vars masked in middle 30%, others fully visible
+                if var_id in target_var_ids:
+                    if vs_mask_start <= p < vs_mask_end:
+                        observed_mask[0, patch_idx, :patch_size] = False
+                        prediction_mask[0, patch_idx] = True
+                    else:
+                        observed_mask[0, patch_idx, :patch_size] = ~nan_mask[start_idx:end_idx]
+                        prediction_mask[0, patch_idx] = False
+                else:
+                    # Non-target vars: fully visible
+                    observed_mask[0, patch_idx, :patch_size] = ~nan_mask[start_idx:end_idx]
+                    prediction_mask[0, patch_idx] = False
+
             patch_idx += 1
-    
-    # Process masked variables (to be predicted)
-    base_var_idx = len(observed_var_ids)
-    for var_idx, var_id in enumerate(masked_var_ids):
-        var_data = full_data[var_id, :total_length].astype(np.float32)
-        nan_mask = np.isnan(var_data)
-        var_data_clean = np.nan_to_num(var_data, nan=0.0)
-        
-        if pad_amount > 0:
-            var_data_clean = np.concatenate([np.zeros(pad_amount, dtype=np.float32), var_data_clean])
-            nan_mask = np.concatenate([np.ones(pad_amount, dtype=bool), nan_mask])
-        
-        for p in range(num_patches_per_var):
-            start_idx = p * patch_size
-            end_idx = start_idx + patch_size
-            
-            target[0, patch_idx, :patch_size] = var_data_clean[start_idx:end_idx]
-            # Masked variables: observed_mask is False, prediction_mask is True
-            observed_mask[0, patch_idx, :patch_size] = False
-            time_id[0, patch_idx] = p
-            variate_id[0, patch_idx] = base_var_idx + var_idx
-            prediction_mask[0, patch_idx] = True  # To predict
-            
-            patch_idx += 1
-    
+
     # Convert to torch
     target = torch.tensor(target, device=device)
     observed_mask = torch.tensor(observed_mask, device=device)
@@ -1020,7 +1055,209 @@ def prepare_fill_in_blank_input(
     variate_id = torch.tensor(variate_id, device=device)
     prediction_mask = torch.tensor(prediction_mask, device=device)
     patch_size_tensor = torch.tensor(patch_size_tensor, device=device)
-    
+
+    return target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size_tensor
+
+
+def predict_multivariate(
+    module: MoiraiModule,
+    full_data: np.ndarray,
+    context_length: int,
+    prediction_length: int,
+    weather_var_ids: List[int],
+    target_var_ids: List[int],
+    task_type: str = 'forecast',
+    patch_size: int = PATCH_SIZE,
+    num_samples: int = NUM_SAMPLES,
+    device: str = 'cpu'
+) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
+    """
+    Unified multi-variate prediction - ALL variates input, returns predictions for targets.
+
+    This matches training where ALL variates are processed together!
+
+    Args:
+        full_data: (num_variates, time_steps) - ALL variates
+        task_type: 'forecast' or 'virtual_sensor'
+
+    Returns:
+        Dict mapping var_id -> (point_pred, samples)
+        Only returns predictions for target_var_ids
+    """
+    max_patch_size = max(module.patch_sizes)
+    num_variates = full_data.shape[0]
+    total_length = context_length + prediction_length
+
+    tensors = prepare_multivariate_input(
+        full_data, context_length, prediction_length,
+        patch_size, max_patch_size, device,
+        weather_var_ids, target_var_ids, task_type
+    )
+    target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size_tensor = tensors
+
+    module = module.to(device)
+    module.eval()
+
+    num_patches_per_var = (total_length + patch_size - 1) // patch_size
+    padded_len = num_patches_per_var * patch_size
+    pad_amount = padded_len - total_length if padded_len > total_length else 0
+
+    with torch.no_grad():
+        distr = module(
+            target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size_tensor
+        )
+
+        samples = distr.sample((num_samples,))  # (num_samples, batch, total_patches, max_patch)
+
+        results = {}
+
+        for var_id in target_var_ids:
+            # Find patches for this variable
+            start_patch = var_id * num_patches_per_var
+            end_patch = start_patch + num_patches_per_var
+
+            var_samples = samples[:, 0, start_patch:end_patch, :patch_size]
+            var_samples = var_samples.reshape(num_samples, -1).cpu().numpy()
+
+            # Remove padding and get correct length
+            if pad_amount > 0:
+                var_samples = var_samples[:, pad_amount:]
+            var_samples = var_samples[:, :total_length]
+
+            if task_type == 'forecast':
+                # For forecast: return only the prediction region (future)
+                pred_samples = var_samples[:, context_length:]
+                point_pred = np.median(pred_samples, axis=0)
+                results[var_id] = (point_pred, pred_samples)
+            else:
+                # For virtual_sensor: return masked region (middle 30%)
+                mask_start = int(total_length * 0.35)
+                mask_end = int(total_length * 0.65)
+                pred_samples = var_samples[:, mask_start:mask_end]
+                point_pred = np.median(pred_samples, axis=0)
+                results[var_id] = (point_pred, pred_samples, mask_start, mask_end)
+
+    return results
+
+
+def prepare_fill_in_blank_input(
+    full_data: np.ndarray,
+    observed_var_ids: List[int],
+    masked_var_ids: List[int],
+    context_length: int,
+    prediction_length: int,
+    patch_size: int,
+    max_patch_size: int,
+    device: str,
+    mask_start_ratio: float = 0.0,
+    mask_end_ratio: float = 1.0
+) -> Tuple[torch.Tensor, ...]:
+    """
+    Prepare input for fill-in-the-blank task.
+
+    In this task:
+    - observed_var_ids: Variables that are fully observed (e.g., weather + zone temps)
+    - masked_var_ids: Variables to be predicted (e.g., ODU power)
+    - mask_start_ratio: Start position of mask as ratio of total length (0.0 = beginning)
+    - mask_end_ratio: End position of mask as ratio of total length (1.0 = end)
+
+    与训练对应：
+    - 训练: 随机 mask 15-50% 的时间步，在任意位置
+    - 评估: 可指定 mask 的位置和长度，但应在训练覆盖范围内
+
+    例如:
+    - mask_start_ratio=0.5, mask_end_ratio=0.8 → mask 中间 30% 的时间步
+    - mask_start_ratio=0.7, mask_end_ratio=1.0 → mask 最后 30% 的时间步 (forecasting)
+
+    This tests whether the model learned causal chains: Weather → ODU → Indoor
+    """
+    total_length = context_length + prediction_length
+    num_vars = len(observed_var_ids) + len(masked_var_ids)
+
+    # Calculate patches
+    num_patches_per_var = (total_length + patch_size - 1) // patch_size
+    padded_len = num_patches_per_var * patch_size
+    pad_amount = padded_len - total_length if padded_len > total_length else 0
+
+    total_patches = num_patches_per_var * num_vars
+
+    # Calculate which patches to mask based on time ratios
+    mask_start_patch = int(num_patches_per_var * mask_start_ratio)
+    mask_end_patch = int(num_patches_per_var * mask_end_ratio)
+    if mask_end_patch <= mask_start_patch:
+        mask_end_patch = mask_start_patch + 1  # At least 1 patch
+
+    # Initialize tensors
+    target = np.zeros((1, total_patches, max_patch_size), dtype=np.float32)
+    observed_mask = np.zeros((1, total_patches, max_patch_size), dtype=bool)
+    sample_id = np.ones((1, total_patches), dtype=np.int64)
+    time_id = np.zeros((1, total_patches), dtype=np.int64)
+    variate_id = np.zeros((1, total_patches), dtype=np.int64)
+    prediction_mask = np.zeros((1, total_patches), dtype=bool)
+    patch_size_tensor = np.full((1, total_patches), patch_size, dtype=np.int64)
+
+    patch_idx = 0
+
+    # Process observed variables (fully visible)
+    for var_idx, var_id in enumerate(observed_var_ids):
+        var_data = full_data[var_id, :total_length].astype(np.float32)
+        nan_mask = np.isnan(var_data)
+        var_data_clean = np.nan_to_num(var_data, nan=0.0)
+
+        if pad_amount > 0:
+            var_data_clean = np.concatenate([np.zeros(pad_amount, dtype=np.float32), var_data_clean])
+            nan_mask = np.concatenate([np.ones(pad_amount, dtype=bool), nan_mask])
+
+        for p in range(num_patches_per_var):
+            start_idx = p * patch_size
+            end_idx = start_idx + patch_size
+
+            target[0, patch_idx, :patch_size] = var_data_clean[start_idx:end_idx]
+            observed_mask[0, patch_idx, :patch_size] = ~nan_mask[start_idx:end_idx]
+            time_id[0, patch_idx] = p
+            variate_id[0, patch_idx] = var_id  # Use actual schema ID, not sequential index!
+            prediction_mask[0, patch_idx] = False  # Observed
+
+            patch_idx += 1
+
+    # Process masked variables (partially masked based on time range)
+    for var_idx, var_id in enumerate(masked_var_ids):
+        var_data = full_data[var_id, :total_length].astype(np.float32)
+        nan_mask = np.isnan(var_data)
+        var_data_clean = np.nan_to_num(var_data, nan=0.0)
+
+        if pad_amount > 0:
+            var_data_clean = np.concatenate([np.zeros(pad_amount, dtype=np.float32), var_data_clean])
+            nan_mask = np.concatenate([np.ones(pad_amount, dtype=bool), nan_mask])
+
+        for p in range(num_patches_per_var):
+            start_idx = p * patch_size
+            end_idx = start_idx + patch_size
+
+            target[0, patch_idx, :patch_size] = var_data_clean[start_idx:end_idx]
+            time_id[0, patch_idx] = p
+            variate_id[0, patch_idx] = var_id  # Use actual schema ID, not sequential index!
+
+            # Only mask patches within the specified time range
+            if mask_start_patch <= p < mask_end_patch:
+                observed_mask[0, patch_idx, :patch_size] = False
+                prediction_mask[0, patch_idx] = True  # To predict
+            else:
+                # Outside mask range: treat as observed
+                observed_mask[0, patch_idx, :patch_size] = ~nan_mask[start_idx:end_idx]
+                prediction_mask[0, patch_idx] = False
+
+            patch_idx += 1
+
+    # Convert to torch
+    target = torch.tensor(target, device=device)
+    observed_mask = torch.tensor(observed_mask, device=device)
+    sample_id = torch.tensor(sample_id, device=device)
+    time_id = torch.tensor(time_id, device=device)
+    variate_id = torch.tensor(variate_id, device=device)
+    prediction_mask = torch.tensor(prediction_mask, device=device)
+    patch_size_tensor = torch.tensor(patch_size_tensor, device=device)
+
     return target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size_tensor
 
 
@@ -1033,47 +1270,63 @@ def predict_fill_in_blank(
     prediction_length: int,
     patch_size: int = PATCH_SIZE,
     num_samples: int = NUM_SAMPLES,
-    device: str = 'cpu'
-) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
+    device: str = 'cpu',
+    mask_start_ratio: float = 0.0,
+    mask_end_ratio: float = 1.0
+) -> Dict[int, Tuple[np.ndarray, np.ndarray, int, int]]:
     """
     Predict masked variables given observed variables.
-    
+
+    Args:
+        mask_start_ratio: Start of mask as ratio of total length (0.0 = beginning)
+        mask_end_ratio: End of mask as ratio of total length (1.0 = end)
+
     Returns:
-        Dict mapping var_id -> (point_pred, samples)
+        Dict mapping var_id -> (point_pred, samples, mask_start_idx, mask_end_idx)
+        point_pred and samples only contain the masked region
     """
     max_patch_size = max(module.patch_sizes)
     total_length = context_length + prediction_length
-    
+
     target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size_tensor = \
         prepare_fill_in_blank_input(
             full_data, observed_var_ids, masked_var_ids,
-            context_length, prediction_length, patch_size, max_patch_size, device
+            context_length, prediction_length, patch_size, max_patch_size, device,
+            mask_start_ratio, mask_end_ratio
         )
-    
+
     module = module.to(device)
     module.eval()
-    
+
+    # Calculate actual mask indices in timesteps
+    mask_start_idx = int(total_length * mask_start_ratio)
+    mask_end_idx = int(total_length * mask_end_ratio)
+    mask_length = mask_end_idx - mask_start_idx
+
     with torch.no_grad():
         distr = module(
             target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size_tensor
         )
-        
+
         samples = distr.sample((num_samples,))  # (num_samples, batch, total_patches, max_patch)
-        
+
         # Extract predictions for masked variables
         results = {}
         num_patches_per_var = (total_length + patch_size - 1) // patch_size
         base_patch_idx = len(observed_var_ids) * num_patches_per_var
-        
+
         for i, var_id in enumerate(masked_var_ids):
             start_patch = base_patch_idx + i * num_patches_per_var
             end_patch = start_patch + num_patches_per_var
-            
+
             var_samples = samples[:, 0, start_patch:end_patch, :patch_size]
             var_samples = var_samples.reshape(num_samples, -1)[:, :total_length].cpu().numpy()
-            
-            point_pred = np.median(var_samples, axis=0)
-            results[var_id] = (point_pred, var_samples)
+
+            # Extract only the masked region for evaluation
+            var_samples_masked = var_samples[:, mask_start_idx:mask_end_idx]
+            point_pred = np.median(var_samples_masked, axis=0)
+
+            results[var_id] = (point_pred, var_samples_masked, mask_start_idx, mask_end_idx)
     
     return results
 
@@ -1111,71 +1364,116 @@ def task1_standard_forecast(
     device: str
 ) -> Dict[str, Dict[str, float]]:
     """
-    Task 1: Standard Forecasting.
-    
-    Given past CONTEXT_LENGTH timesteps, predict future PREDICTION_LENGTH timesteps.
-    Evaluates time extrapolation ability.
+    Task 1: Standard Forecasting (MULTI-VARIATE).
+
+    CRITICAL: Input ALL variates together, matching training!
+    - History: all variates visible
+    - Future: Weather visible (can be forecasted), others masked
+
+    This tests whether the model learned cross-variate relationships.
     """
     results = {name: [] for name in models.keys()}
-    
+
     seasonal_naive = SeasonalNaiveModel()
-    
+
     for idx in range(min(len(test_hf), max_samples)):
         sample = test_hf[idx]
-        target = np.array(sample['target'])
-        
+        target = np.array(sample['target'])  # (num_variates, time_steps)
+        num_variates = target.shape[0]
+
+        # Find best window using first target variable
+        first_var = var_ids[0] if var_ids[0] < num_variates else 10
+        var_data = target[first_var, :]
+        start_idx = find_best_window(var_data, CONTEXT_LENGTH, PREDICTION_LENGTH)
+        end_idx = start_idx + CONTEXT_LENGTH + PREDICTION_LENGTH
+
+        if end_idx > target.shape[1]:
+            continue
+
+        # Extract window for ALL variates
+        full_data = target[:, start_idx:end_idx]  # (num_variates, total_length)
+
+        # Evaluate baselines per-variable (they can't do multi-variate)
         for var_id in var_ids:
-            if var_id >= target.shape[0]:
+            if var_id >= num_variates:
                 continue
-            
-            var_data = target[var_id, :]
-            start_idx = find_best_window(var_data, CONTEXT_LENGTH, PREDICTION_LENGTH)
-            end_idx = start_idx + CONTEXT_LENGTH + PREDICTION_LENGTH
-            
-            if end_idx > len(var_data):
-                continue
-            
-            full_window = var_data[start_idx:end_idx]
-            context = full_window[:CONTEXT_LENGTH]
-            future_true = full_window[CONTEXT_LENGTH:]
-            
-            # Check for valid data
+
+            var_window = full_data[var_id, :]
+            context = var_window[:CONTEXT_LENGTH]
+            future_true = var_window[CONTEXT_LENGTH:]
+
             if np.isnan(context).sum() > CONTEXT_LENGTH * 0.5:
                 continue
             if np.all(np.isnan(future_true)):
                 continue
-            
-            # Get seasonal naive error for MSIS scaling
+
+            # Seasonal Naive baseline
             sn_pred, _ = seasonal_naive.predict(context, PREDICTION_LENGTH)
             seasonal_mae = np.nanmean(np.abs(future_true - sn_pred))
             if np.isnan(seasonal_mae) or seasonal_mae < 1e-8:
                 seasonal_mae = 1.0
-            
-            # Evaluate each model
-            for model_name, model in models.items():
-                if model is None:
-                    continue
-                
-                if model_name == 'Seasonal Naive':
-                    point_pred, samples = sn_pred, None
-                elif model_name == 'XGBoost':
-                    point_pred, samples = model.predict(context, PREDICTION_LENGTH)
-                else:
-                    # MOIRAI models
-                    point_pred, samples = predict_moirai(
-                        model, full_window, CONTEXT_LENGTH, PREDICTION_LENGTH,
-                        PATCH_SIZE, NUM_SAMPLES, device
-                    )
-                
-                if np.isnan(point_pred).all() or np.isinf(point_pred).any():
-                    continue
-                
-                metrics = calculate_all_metrics(future_true, point_pred, samples, seasonal_mae)
-                results[model_name].append(metrics)
-                
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-    
+
+            # Seasonal Naive
+            if 'Seasonal Naive' in models and models['Seasonal Naive'] is not None:
+                metrics = calculate_all_metrics(future_true, sn_pred, None, seasonal_mae)
+                results['Seasonal Naive'].append(metrics)
+
+            # XGBoost
+            if 'XGBoost' in models and models['XGBoost'] is not None:
+                xgb_pred, _ = models['XGBoost'].predict(context, PREDICTION_LENGTH)
+                if not (np.isnan(xgb_pred).all() or np.isinf(xgb_pred).any()):
+                    metrics = calculate_all_metrics(future_true, xgb_pred, None, seasonal_mae)
+                    results['XGBoost'].append(metrics)
+
+        # MOIRAI models: use multi-variate prediction (ALL variates input!)
+        moirai_models = {k: v for k, v in models.items()
+                        if k not in ['Seasonal Naive', 'XGBoost'] and v is not None}
+
+        for model_name, module in moirai_models.items():
+            try:
+                # Input ALL variates, get predictions for target vars
+                predictions = predict_multivariate(
+                    module,
+                    full_data,
+                    context_length=CONTEXT_LENGTH,
+                    prediction_length=PREDICTION_LENGTH,
+                    weather_var_ids=WEATHER_VAR_IDS,
+                    target_var_ids=var_ids,
+                    task_type='forecast',
+                    patch_size=PATCH_SIZE,
+                    num_samples=NUM_SAMPLES,
+                    device=device
+                )
+
+                # Calculate metrics for each target variable
+                for var_id in var_ids:
+                    if var_id not in predictions:
+                        continue
+
+                    point_pred, samples = predictions[var_id]
+                    future_true = full_data[var_id, CONTEXT_LENGTH:]
+                    context = full_data[var_id, :CONTEXT_LENGTH]
+
+                    if np.all(np.isnan(future_true)):
+                        continue
+
+                    # Seasonal MAE for scaling
+                    sn_pred, _ = seasonal_naive.predict(context, PREDICTION_LENGTH)
+                    seasonal_mae = np.nanmean(np.abs(future_true - sn_pred))
+                    if np.isnan(seasonal_mae) or seasonal_mae < 1e-8:
+                        seasonal_mae = 1.0
+
+                    if not (np.isnan(point_pred).all() or np.isinf(point_pred).any()):
+                        metrics = calculate_all_metrics(future_true, point_pred, samples, seasonal_mae)
+                        results[model_name].append(metrics)
+
+            except Exception as e:
+                print(f"  Warning: {model_name} failed on sample {idx}: {e}")
+                continue
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     # Aggregate metrics
     aggregated = {}
     for model_name, metric_list in results.items():
@@ -1186,7 +1484,7 @@ def task1_standard_forecast(
             for key in metric_list[0].keys():
                 values = [m[key] for m in metric_list if not np.isnan(m[key])]
                 aggregated[model_name][key] = np.mean(values) if values else np.nan
-    
+
     return aggregated
 
 
@@ -1197,31 +1495,44 @@ def task2_fill_in_blank(
     device: str
 ) -> Dict[str, Dict[str, float]]:
     """
-    Task 2: Fill-in-the-Blank (Causal Chain Validation).
-    
+    Task 2: Fill-in-the-Blank (Cross-Variate Inference).
+
+    与训练对应：
+    - 训练: 随机选择部分 variates，每个 mask 15-50% 的时间步（任意位置）
+    - 评估: 选择 ODU Power variates，mask 中间 30% 的时间步
+
     Given:
-    - Weather variables (boundary conditions)
-    - Zone temperatures (end results)
-    
+    - Weather variables (boundary conditions) - 100% observed
+    - Zone temperatures (end results) - 100% observed
+    - ODU Power (target) - 前后各 35% observed，中间 30% masked
+
     Predict:
-    - ODU Power (intermediate in causal chain)
-    
+    - ODU Power 的中间 30% 时间步
+
+    这样评估与训练的 masking 模式一致：
+    - 训练覆盖了 "部分 variates 的部分时间步 masked" 的情况
+    - 评估是这个模式的一个特定实例
+
     This validates whether the model learned: Weather → HVAC Power → Indoor Conditions
-    
+
     NOTE: Only MOIRAI can do this task. XGBoost cannot handle arbitrary masking.
     """
+    # Mask configuration - aligned with training (15-50% mask ratio)
+    MASK_START_RATIO = 0.35  # Start masking at 35% of the window
+    MASK_END_RATIO = 0.65    # End masking at 65% of the window (30% masked)
+
     results = {name: [] for name in moirai_models.keys()}
-    
+
     for idx in range(min(len(test_hf), max_samples)):
         sample = test_hf[idx]
         target = np.array(sample['target'])
-        
+
         # Use shorter window for fill-in-blank (no future prediction)
         total_length = CONTEXT_LENGTH
-        
+
         if target.shape[1] < total_length:
             continue
-        
+
         # Find good start position (where ODU power has variance)
         odu_data = target[ODU_POWER_VAR_IDS[0], :]
         best_start = 0
@@ -1234,17 +1545,19 @@ def task2_fill_in_blank(
                 if var > best_var:
                     best_var = var
                     best_start = start
-        
+
         full_data = target[:, best_start:best_start + total_length]
-        
-        # Get ground truth for masked variables
-        true_odu = {var_id: full_data[var_id, :] for var_id in ODU_POWER_VAR_IDS}
-        
+
+        # Get ground truth for masked region only
+        mask_start_idx = int(total_length * MASK_START_RATIO)
+        mask_end_idx = int(total_length * MASK_END_RATIO)
+        true_odu = {var_id: full_data[var_id, mask_start_idx:mask_end_idx] for var_id in ODU_POWER_VAR_IDS}
+
         # Evaluate each MOIRAI model
         for model_name, module in moirai_models.items():
             if module is None:
                 continue
-            
+
             predictions = predict_fill_in_blank(
                 module, full_data,
                 observed_var_ids=WEATHER_VAR_IDS + ZONE_TEMP_VAR_IDS,
@@ -1253,15 +1566,17 @@ def task2_fill_in_blank(
                 prediction_length=0,  # No future prediction, just fill-in
                 patch_size=PATCH_SIZE,
                 num_samples=NUM_SAMPLES,
-                device=device
+                device=device,
+                mask_start_ratio=MASK_START_RATIO,
+                mask_end_ratio=MASK_END_RATIO
             )
-            
+
             # Calculate metrics for masked variables
             for var_id in ODU_POWER_VAR_IDS:
                 if var_id not in predictions:
                     continue
-                
-                point_pred, samples = predictions[var_id]
+
+                point_pred, samples, _, _ = predictions[var_id]
                 y_true = true_odu[var_id]
                 
                 if np.isnan(point_pred).all():
@@ -1381,16 +1696,17 @@ def task3_ood_stress_test(
                 elif model_name == 'XGBoost':
                     point_pred, samples = model.predict(context, PREDICTION_LENGTH)
                 else:
+                    # MOIRAI models - pass var_id for correct variate embedding
                     point_pred, samples = predict_moirai(
                         model, full_window, CONTEXT_LENGTH, PREDICTION_LENGTH,
-                        PATCH_SIZE, NUM_SAMPLES, device
+                        PATCH_SIZE, NUM_SAMPLES, device, var_id=var_id
                     )
-                
+
                 if np.isnan(point_pred).all() or np.isinf(point_pred).any():
                     continue
-                
+
                 metrics = calculate_all_metrics(future_true, point_pred, samples, seasonal_mae)
-                
+
                 # Add to all applicable conditions
                 for condition in applicable_conditions:
                     results[condition][model_name].append(metrics)
@@ -1696,7 +2012,8 @@ def plot_sample_predictions(
             point_pred, _ = model.predict(context, PREDICTION_LENGTH) if model else (np.full(PREDICTION_LENGTH, np.nan), None)
         elif model is not None:
             # MOIRAI: get both point prediction and samples for confidence interval
-            point_pred, samples = predict_moirai(model, full_window, CONTEXT_LENGTH, PREDICTION_LENGTH, PATCH_SIZE, NUM_SAMPLES, device)
+            # Pass var_id for correct variate embedding consistency with training
+            point_pred, samples = predict_moirai(model, full_window, CONTEXT_LENGTH, PREDICTION_LENGTH, PATCH_SIZE, NUM_SAMPLES, device, var_id=var_id)
         else:
             point_pred = np.full(PREDICTION_LENGTH, np.nan)
         
@@ -1950,28 +2267,134 @@ def create_summary_table(all_results: Dict, output_dir: Path):
 
 
 # =============================================================================
-# Part 6: Main Function
+# Part 6: Model Loading Helper
+# =============================================================================
+
+def load_model_by_name(model_dir_name: str, device: str = 'cpu') -> MoiraiModule:
+    """
+    根据目录名加载指定模型，自动找 best epoch 对应的 checkpoint。
+    """
+    model_dir = MODEL_OUTPUT_DIR / model_dir_name
+    assert model_dir.exists(), f"Model directory not found: {model_dir}"
+
+    ckpt_dir = model_dir / 'checkpoints'
+    assert ckpt_dir.exists(), f"No checkpoints directory in {model_dir}"
+
+    best_ckpts = list(ckpt_dir.glob('best-*.ckpt'))
+    assert best_ckpts, f"No best-*.ckpt found in {ckpt_dir}"
+
+    # 从 csv_logs 找 best epoch
+    csv_log_path = model_dir / 'csv_logs' / 'version_0' / 'metrics.csv'
+    assert csv_log_path.exists(), f"CSV log not found: {csv_log_path}"
+    
+    df = pd.read_csv(csv_log_path)
+    val_df = df[df['val/PackedNLLLoss'].notna()]
+    assert len(val_df) > 0, f"No validation loss records in {csv_log_path}"
+    
+    best_epoch = int(val_df.loc[val_df['val/PackedNLLLoss'].idxmin(), 'epoch'])
+
+    # 找对应 epoch 的 checkpoint
+    ckpt_path = None
+    for ckpt in best_ckpts:
+        for part in ckpt.stem.split('-'):
+            if part.startswith('epoch='):
+                if int(part.split('=')[1]) == best_epoch:
+                    ckpt_path = ckpt
+                    break
+        if ckpt_path:
+            break
+    
+    assert ckpt_path is not None, f"Checkpoint for epoch {best_epoch} not found. Available: {[c.name for c in best_ckpts]}"
+
+    print(f"  Loading {model_dir_name} from {ckpt_path.name} (best epoch={best_epoch})...")
+    return load_model_from_checkpoint(ckpt_path, device)
+
+
+def list_available_models():
+    """列出所有可用的模型目录"""
+    print("\n" + "=" * 60)
+    print("Available models in:", MODEL_OUTPUT_DIR)
+    print("=" * 60)
+
+    for d in sorted(MODEL_OUTPUT_DIR.iterdir()):
+        if d.is_dir() and d.name.startswith('moirai_'):
+            ckpt_dir = d / 'checkpoints'
+            has_ckpt = ckpt_dir.exists() and list(ckpt_dir.glob('best-*.ckpt'))
+            status = "✓" if has_ckpt else "✗"
+            print(f"  {status} {d.name}")
+
+    print("=" * 60)
+
+
+# =============================================================================
+# Part 7: Main Function
 # =============================================================================
 
 def main():
     """Main evaluation function integrating all three tasks."""
-    
+
+    # =========================================================================
+    # ★★★ 用户配置区域 - 在这里指定要对比的模型 ★★★
+    # =========================================================================
+    #
+    # 模式选择:
+    #   - 'auto': 自动发现所有模型，每个 size+pattern 组合选最佳
+    #   - 'manual': 手动指定要对比的模型（使用下面的 MODELS_TO_COMPARE）
+    #
+    EVAL_MODE = 'manual'  # 'auto' 或 'manual'
+
+    # 手动模式下，指定要对比的模型
+    # 格式: { '显示名称': '模型目录名' }
+    # 目录名就是 outputs/buildingfm_15min/ 下的文件夹名
+    #
+    # 示例:
+    MODELS_TO_COMPARE = {
+        # 'Small-Full-5e6': 'moirai_small_full_5e6',
+        # 'Small-Freeze-1e5': 'moirai_small_freeze_ffn_1e5',
+        # 'Small-Head-1e4': 'moirai_small_head_only_1e4',
+        # 'Base-Full-1e6': 'moirai_base_full_1e6',
+        # 'Base-Freeze-5e6': 'moirai_base_freeze_ffn_5e6',
+        # 'Base-Head-5e5': 'moirai_base_head_only_5e5',
+        'Small-Full-1e5': 'moirai_small_full',
+        'Small-Freeze-1e5': 'moirai_small_freeze_ffn',
+        'Small-Head--1e5': 'moirai_small_head_only',
+    }
+
+    # 是否包含 zero-shot baseline (未微调的原始模型)
+    INCLUDE_ZEROSHOT = {
+        'small': True,   # 包含 Small (Zero-shot)
+        'base': False,   # 包含 Base (Zero-shot)
+    }
+
+    # 是否包含传统 baseline
+    INCLUDE_SEASONAL_NAIVE = True
+    INCLUDE_XGBOOST = True
+
+    # 运行 list_available_models() 可以查看所有可用模型
+    # list_available_models()
+    # return
+
+    # =========================================================================
+    # 以下是评估逻辑，一般不需要修改
+    # =========================================================================
+
     print("=" * 80)
     print("BuildingFM Comprehensive Model Evaluation")
     print("=" * 80)
+    print(f"Mode: {EVAL_MODE}")
     print("Tasks: Standard Forecast | Fill-in-Blank | OOD Stress Test")
     print("Metrics: SMAPE | CRPS | MSIS | Smoothed MAE | Consistency")
     print("=" * 80)
-    
+
     # Setup
     output_dir = OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"\nDevice: {device}")
-    
+
     torch.set_float32_matmul_precision('high')
-    
+
     # =========================================================================
     # Load Data
     # =========================================================================
@@ -1979,102 +2402,137 @@ def main():
     hf_data_dir = DATA_DIR / 'hf'
     test_hf = datasets.load_from_disk(str(hf_data_dir / 'buildingfm_test'))
     print(f"  Test samples: {len(test_hf)}")
-    
+
     sample = test_hf[0]
     num_variates = np.array(sample['target']).shape[0]
     print(f"  Num variates: {num_variates}")
-    
+
     # =========================================================================
-    # Load All Models
+    # Load Models
     # =========================================================================
     print("\n[2/7] Loading models...")
-    
-    models = {
-        'Seasonal Naive': SeasonalNaiveModel(),
-        'XGBoost': None,
-    }
-    
-    # Load XGBoost if available
-    xgb_path = BASELINES_DIR / 'xgboost_model.joblib'
-    if xgb_path.exists():
-        print("  Loading XGBoost...")
-        models['XGBoost'] = XGBoostModel(xgb_path)
-    else:
-        print("  XGBoost model not found (skipping)")
-    
-    # Load MOIRAI models: auto-discover all experiments and select best for each size+pattern
-    print("\n  Auto-discovering MOIRAI models...")
-    discovered = discover_all_models(MODEL_OUTPUT_DIR)
 
-    if discovered:
-        print(f"  Found {sum(len(v) for v in discovered.values())} model directories in {len(discovered)} groups")
-        for key, dirs in discovered.items():
-            print(f"    {key}: {len(dirs)} experiments")
-    else:
-        print("  No MOIRAI models discovered!")
+    models = {}
 
-    # First load zero-shot baselines (one per size) - try any available model's baseline
-    for size in MODEL_SIZES:
-        baseline_path = None
-        # Try to find baseline from any pattern
-        for pattern in FINETUNE_PATTERNS:
-            key = f'{size}_{pattern}'
-            if key in discovered and discovered[key]:
-                candidate = discovered[key][0] / 'baseline_untrained.pt'
-                if candidate.exists():
-                    baseline_path = candidate
-                    break
-        # Fallback to default path
-        if baseline_path is None:
-            baseline_path = get_model_dir(size, 'full') / 'baseline_untrained.pt'
+    # Traditional baselines
+    if INCLUDE_SEASONAL_NAIVE:
+        models['Seasonal Naive'] = SeasonalNaiveModel()
 
-        if baseline_path.exists():
-            display_name = f'{size.capitalize()} (Zero-shot)'
-            print(f"  Loading {display_name}...")
-            models[display_name] = load_model_from_baseline(baseline_path, device)
+    if INCLUDE_XGBOOST:
+        xgb_path = BASELINES_DIR / 'xgboost_model.joblib'
+        if xgb_path.exists():
+            print("  Loading XGBoost...")
+            models['XGBoost'] = XGBoostModel(xgb_path)
+        else:
+            print("  XGBoost model not found (skipping)")
 
-    # Load best finetuned model for each size+pattern combination
-    for size in MODEL_SIZES:
-        for pattern in FINETUNE_PATTERNS:
-            key = f'{size}_{pattern}'
-            display_name = DISPLAY_NAMES.get(key, f'{size.capitalize()}-{pattern}')
+    if EVAL_MODE == 'manual':
+        # =====================================================================
+        # 手动模式: 加载用户指定的模型
+        # =====================================================================
+        print("\n  Loading specified models...")
 
-            if key not in discovered or not discovered[key]:
-                print(f"  {display_name}: no experiments found (skipping)")
+        # Load zero-shot baselines if requested
+        for size, include in INCLUDE_ZEROSHOT.items():
+            if not include:
                 continue
 
-            # Find best model among all experiments for this size+pattern
-            best_result = find_best_model_for_group(discovered[key])
+            # Find baseline from any available model of this size
+            baseline_path = None
+            for d in MODEL_OUTPUT_DIR.iterdir():
+                if d.is_dir() and d.name.startswith(f'moirai_{size}_'):
+                    candidate = d / 'baseline_untrained.pt'
+                    if candidate.exists():
+                        baseline_path = candidate
+                        break
 
-            if best_result is None:
-                print(f"  {display_name}: no valid checkpoints found (skipping)")
-                continue
+            if baseline_path and baseline_path.exists():
+                display_name = f'{size.capitalize()} (Zero-shot)'
+                print(f"  Loading {display_name}...")
+                models[display_name] = load_model_from_baseline(baseline_path, device)
 
-            best_dir, best_loss = best_result
-            ckpt_dir = best_dir / 'checkpoints'
+        # Load specified finetuned models
+        for display_name, model_dir_name in MODELS_TO_COMPARE.items():
+            module = load_model_by_name(model_dir_name, device)
+            models[display_name] = module
+            # 自动添加颜色
+            if display_name not in MODEL_COLORS:
+                import hashlib
+                h = int(hashlib.md5(display_name.encode()).hexdigest()[:6], 16)
+                MODEL_COLORS[display_name] = f'#{h:06x}'
 
-            # Find best checkpoint (skip first 2 epochs to avoid early stopping artifacts)
-            all_best = list(ckpt_dir.glob('best-*.ckpt'))
-            valid_ckpts = []
-            for p in all_best:
-                try:
-                    epoch = int(p.stem.split('-')[1])
-                    if epoch > 2:
+    else:
+        # =====================================================================
+        # 自动模式: 原有的自动发现逻辑
+        # =====================================================================
+        print("\n  Auto-discovering MOIRAI models...")
+        discovered = discover_all_models(MODEL_OUTPUT_DIR)
+
+        if discovered:
+            print(f"  Found {sum(len(v) for v in discovered.values())} model directories in {len(discovered)} groups")
+            for key, dirs in discovered.items():
+                print(f"    {key}: {len(dirs)} experiments")
+        else:
+            print("  No MOIRAI models discovered!")
+
+        # First load zero-shot baselines (one per size)
+        for size in MODEL_SIZES:
+            baseline_path = None
+            for pattern in FINETUNE_PATTERNS:
+                key = f'{size}_{pattern}'
+                if key in discovered and discovered[key]:
+                    candidate = discovered[key][0] / 'baseline_untrained.pt'
+                    if candidate.exists():
+                        baseline_path = candidate
+                        break
+            if baseline_path is None:
+                baseline_path = get_model_dir(size, 'full') / 'baseline_untrained.pt'
+
+            if baseline_path.exists():
+                display_name = f'{size.capitalize()} (Zero-shot)'
+                print(f"  Loading {display_name}...")
+                models[display_name] = load_model_from_baseline(baseline_path, device)
+
+        # Load best finetuned model for each size+pattern combination
+        for size in MODEL_SIZES:
+            for pattern in FINETUNE_PATTERNS:
+                key = f'{size}_{pattern}'
+                display_name = DISPLAY_NAMES.get(key, f'{size.capitalize()}-{pattern}')
+
+                if key not in discovered or not discovered[key]:
+                    print(f"  {display_name}: no experiments found (skipping)")
+                    continue
+
+                best_result = find_best_model_for_group(discovered[key])
+
+                if best_result is None:
+                    print(f"  {display_name}: no valid checkpoints found (skipping)")
+                    continue
+
+                best_dir, best_loss = best_result
+                ckpt_dir = best_dir / 'checkpoints'
+
+                all_best = list(ckpt_dir.glob('best-*.ckpt'))
+                valid_ckpts = []
+                for p in all_best:
+                    try:
+                        epoch = int(p.stem.split('-')[1])
+                        if epoch > 2:
+                            valid_ckpts.append(p)
+                    except (IndexError, ValueError):
                         valid_ckpts.append(p)
-                except (IndexError, ValueError):
-                    valid_ckpts.append(p)
 
-            if not valid_ckpts:
-                valid_ckpts = all_best  # Fallback to all if none pass filter
+                if not valid_ckpts:
+                    valid_ckpts = all_best
 
-            best_ckpts = sorted(valid_ckpts, key=lambda p: p.stat().st_mtime, reverse=True)
-            ckpt_path = best_ckpts[0] if best_ckpts else None
+                best_ckpts = sorted(valid_ckpts, key=lambda p: p.stat().st_mtime, reverse=True)
+                ckpt_path = best_ckpts[0] if best_ckpts else None
 
-            if ckpt_path and ckpt_path.exists():
-                print(f"  Loading {display_name} from {best_dir.name}/{ckpt_path.name} (val_loss={best_loss:.4f})...")
-                models[display_name] = load_model_from_checkpoint(ckpt_path, device)
-            else:
-                print(f"  {display_name}: checkpoint file not found (skipping)")
+                if ckpt_path and ckpt_path.exists():
+                    print(f"  Loading {display_name} from {best_dir.name}/{ckpt_path.name} (val_loss={best_loss:.4f})...")
+                    models[display_name] = load_model_from_checkpoint(ckpt_path, device)
+                else:
+                    print(f"  {display_name}: checkpoint file not found (skipping)")
     
     # Filter out None models for counting
     loaded_models = {k: v for k, v in models.items() if v is not None}

@@ -57,7 +57,7 @@ CONFIG = {
         # head_only:  只训练输出头 (最快，验证训练正常)
         # freeze_ffn: 冻结FFN层 (推荐起点，平衡效果和稳定性)
         # full:       全参数微调 (效果最好但易过拟合)
-        'pattern': 'freeze_ffn',
+        'pattern': 'head_only',
 
         # 输出目录命名: 自动生成为 moirai_{pretrained}_{pattern}
         # 例如: moirai_base_full, moirai_small_freeze_ffn
@@ -65,9 +65,9 @@ CONFIG = {
         'model_name': None,
 
         # ===== 关键超参数 (已按论文研究调整) =====
-        'epochs': 10,          # 减少! Foundation model容易过拟合 (原50->10)
+        'epochs': 20,          # 减少! Foundation model容易过拟合 (原50->10)
         'lr': 1e-5,            # 降低! 比预训练低100-1000倍 (原5e-5->1e-5)
-        'batch_size': 64,      # small可用64, base用32
+        'batch_size': 16,      # small可用64, base用32
         'patience': 5,         # 与epochs匹配 (原15->5)
         'weight_decay': 0.1,   # 与预训练保持一致! (原0.01->0.1)
         'warmup_steps': 100,   # 约占总steps的5-10%
@@ -136,9 +136,288 @@ import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, Callback
 from lightning.pytorch.loggers import TensorBoardLogger, CSVLogger
 
+# 导入transform组件，用于创建固定variate ID的子类
+from collections import defaultdict
+from uni2ts.transform import (
+    SampleDimension, GetPatchSize, PatchCrop, PackFields,
+    AddObservedMask, ImputeTimeSeries, Patchify,
+    AddVariateIndex, AddTimeIndex, MaskedPrediction, ExtendMask,
+    FlatPackCollection, FlatPackFields, SequencifyField, SelectFields,
+    DefaultPatchSizeConstraints, DummyValueImputation,
+)
+from uni2ts.transform._base import Transformation
+from uni2ts.transform._mixin import MapFuncMixin, CheckArrNDimMixin
+from dataclasses import dataclass
+
 
 # =============================================================================
-# Live Plotting Callback
+# UniversalMaskedPrediction - 通用随机 Masking 策略
+# =============================================================================
+
+@dataclass
+class UniversalMaskedPrediction(MapFuncMixin, CheckArrNDimMixin, Transformation):
+    """
+    通用随机 Masking 策略：随机选择部分 variates，对每个随机选择一段时间区间进行 mask。
+
+    这样模型同时学会：
+    1. Forecasting: 当 mask 区间在最后时
+    2. Interpolation/Fill-in-blank: 当 mask 区间在中间时
+    3. Cross-variate inference: 当只 mask 部分 variates 时
+    4. Backcasting: 当 mask 区间在开头时
+
+    与原版 MaskedPrediction 的区别:
+    - 原版: 对所有 variates mask 最后 N 个时间步（只能学 forecasting）
+    - 本版: 随机选择部分 variates，每个 variate 随机选择任意时间区间
+
+    设计理由:
+    - 训练收敛 = 评估一定好（因为训练和评估任务类型一致）
+    - 支持多种下游任务而不需要分别训练
+    """
+    min_mask_ratio: float = 0.15  # 每个被选中variate最少mask 15%的时间步
+    max_mask_ratio: float = 0.5   # 每个被选中variate最多mask 50%的时间步
+    min_var_ratio: float = 0.1    # 最少mask 10%的variates
+    max_var_ratio: float = 0.5    # 最多mask 50%的variates
+    target_field: str = "target"
+    truncate_fields: tuple = ()
+    optional_truncate_fields: tuple = ()
+    prediction_mask_field: str = "prediction_mask"
+    expected_ndim: int = 3  # (var, time, patch_size)
+
+    def __call__(self, data_entry: dict) -> dict:
+        target = data_entry[self.target_field]
+        prediction_mask = self._generate_prediction_mask(target)
+        data_entry[self.prediction_mask_field] = prediction_mask
+
+        # 不需要truncate，保留完整数据让模型看到所有context
+        # 模型通过prediction_mask知道哪些位置需要预测
+        return data_entry
+
+    def _generate_prediction_mask(self, target: np.ndarray) -> np.ndarray:
+        """
+        生成通用随机 prediction mask。
+
+        策略：
+        1. 随机选择部分 variates（不是全部）
+        2. 对每个被选中的 variate，随机选择一段时间区间（任意位置）
+        3. 这段时间区间就是需要预测的部分
+        """
+        self.check_ndim("target", target, self.expected_ndim)
+        var, time = target.shape[:2]
+        prediction_mask = np.zeros((var, time), dtype=bool)
+
+        # Step 1: 随机选择要 mask 的 variates 数量
+        var_ratio = np.random.uniform(self.min_var_ratio, self.max_var_ratio)
+        num_masked_vars = max(1, round(var * var_ratio))
+        masked_variates = np.random.choice(var, size=num_masked_vars, replace=False)
+
+        # Step 2: 对每个被选中的 variate，随机选择一段时间区间
+        for v in masked_variates:
+            # 随机决定 mask 多长
+            mask_ratio = np.random.uniform(self.min_mask_ratio, self.max_mask_ratio)
+            mask_length = max(1, int(time * mask_ratio))
+
+            # 随机选择起始位置（可以是任意位置：开头、中间、最后）
+            max_start = time - mask_length
+            if max_start > 0:
+                start_pos = np.random.randint(0, max_start + 1)
+            else:
+                start_pos = 0
+
+            # 设置 mask
+            prediction_mask[v, start_pos:start_pos + mask_length] = True
+
+        return prediction_mask
+
+
+# =============================================================================
+# MoiraiPretrainFixedVariate - 禁用Variate ID随机化
+# =============================================================================
+
+class MoiraiPretrainFixedVariate(MoiraiPretrain):
+    """
+    MoiraiPretrain的子类，禁用variate ID randomization。
+
+    原始MoiraiPretrain使用 randomize=True，导致每个batch的变量顺序随机打乱。
+    这对于通用预训练有好处（学习变量无关的模式），但对于领域微调不利，
+    因为我们希望模型学习固定的变量间物理关系（如Super Schema定义的ID映射）。
+
+    关键修改: AddVariateIndex(..., randomize=False)
+    """
+
+    @property
+    def train_transform_map(self):
+        """覆盖父类的transform_map，将randomize设为False"""
+        def default_train_transform():
+            return (
+                SampleDimension(
+                    max_dim=self.hparams.max_dim,
+                    fields=("target",),
+                    optional_fields=("past_feat_dynamic_real",),
+                )
+                + GetPatchSize(
+                    min_time_patches=self.hparams.min_patches,
+                    target_field="target",
+                    patch_sizes=self.module.patch_sizes,
+                    patch_size_constraints=DefaultPatchSizeConstraints(),
+                    offset=True,
+                )
+                + PatchCrop(
+                    min_time_patches=self.hparams.min_patches,
+                    max_patches=self.module.max_seq_len,
+                    will_flatten=True,
+                    offset=True,
+                    fields=("target",),
+                    optional_fields=("past_feat_dynamic_real",),
+                )
+                + PackFields(
+                    output_field="target",
+                    fields=("target",),
+                    optional_fields=("past_feat_dynamic_real",),
+                )
+                + AddObservedMask(
+                    fields=("target",),
+                    optional_fields=("past_feat_dynamic_real",),
+                    observed_mask_field="observed_mask",
+                    collection_type=dict,
+                )
+                + ImputeTimeSeries(
+                    fields=("target",),
+                    optional_fields=("past_feat_dynamic_real",),
+                    imputation_method=DummyValueImputation(value=0.0),
+                )
+                + Patchify(
+                    max_patch_size=max(self.module.patch_sizes),
+                    fields=("target", "observed_mask"),
+                    optional_fields=("past_feat_dynamic_real",),
+                )
+                + AddVariateIndex(
+                    fields=("target",),
+                    optional_fields=("past_feat_dynamic_real",),
+                    variate_id_field="variate_id",
+                    expected_ndim=3,
+                    max_dim=self.hparams.max_dim,
+                    randomize=False,  # ← 关键修改：禁用随机化！
+                    collection_type=dict,
+                )
+                + AddTimeIndex(
+                    fields=("target",),
+                    optional_fields=("past_feat_dynamic_real",),
+                    time_id_field="time_id",
+                    expected_ndim=3,
+                    collection_type=dict,
+                )
+                # 使用 UniversalMaskedPrediction 进行通用随机 masking 训练
+                # 关键修改：随机选择部分 variates，每个随机选择一段时间区间
+                # 这样模型同时学会 forecasting、interpolation、cross-variate inference
+                + UniversalMaskedPrediction(
+                    min_mask_ratio=self.hparams.min_mask_ratio,
+                    max_mask_ratio=self.hparams.max_mask_ratio,
+                    min_var_ratio=0.1,   # 最少 mask 10% 的 variates
+                    max_var_ratio=0.5,   # 最多 mask 50% 的 variates
+                    target_field="target",
+                    prediction_mask_field="prediction_mask",
+                    expected_ndim=3,
+                )
+                + ExtendMask(
+                    fields=tuple(),
+                    optional_fields=("past_feat_dynamic_real",),
+                    mask_field="prediction_mask",
+                    expected_ndim=3,
+                )
+                + FlatPackCollection(field="variate_id", feat=False)
+                + FlatPackCollection(field="time_id", feat=False)
+                + FlatPackCollection(field="prediction_mask", feat=False)
+                + FlatPackCollection(field="observed_mask", feat=True)
+                + FlatPackFields(
+                    output_field="target",
+                    fields=("target",),
+                    optional_fields=("past_feat_dynamic_real",),
+                    feat=True,
+                )
+                + SequencifyField(field="patch_size", target_field="target")
+                + SelectFields(fields=list(self.seq_fields))
+            )
+        return defaultdict(lambda: default_train_transform)
+
+
+# =============================================================================
+# Final Plot Callback - 训练结束时绘图
+# =============================================================================
+
+class FinalPlotCallback(Callback):
+    """训练结束时绘制训练曲线（不影响训练速度）"""
+
+    def __init__(self, output_dir: Path):
+        super().__init__()
+        self.output_dir = output_dir
+        self.train_losses = []
+        self.val_losses = []
+        self.epochs = []
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        """记录训练loss"""
+        if 'train/PackedNLLLoss' in trainer.callback_metrics:
+            self.train_losses.append(trainer.callback_metrics['train/PackedNLLLoss'].item())
+            self.epochs.append(trainer.current_epoch)
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        """记录验证loss"""
+        if 'val/PackedNLLLoss' in trainer.callback_metrics:
+            val_loss = trainer.callback_metrics['val/PackedNLLLoss'].item()
+            while len(self.val_losses) < len(self.train_losses) - 1:
+                self.val_losses.append(None)
+            self.val_losses.append(val_loss)
+
+    def on_fit_end(self, trainer, pl_module):
+        """训练结束时绘制最终图表"""
+        self._plot_final()
+
+    def _plot_final(self):
+        """绘制训练曲线并显示"""
+        try:
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+            if len(self.epochs) > 0:
+                ax.plot(self.epochs, self.train_losses, 'b-o', label='Train Loss', markersize=4)
+                val_epochs = [e for e, v in zip(self.epochs, self.val_losses) if v is not None]
+                val_vals = [v for v in self.val_losses if v is not None]
+                if val_vals:
+                    ax.plot(val_epochs, val_vals, 'r-o', label='Val Loss', markersize=4)
+                    # 标注最佳点
+                    min_val = min(val_vals)
+                    min_epoch = val_epochs[val_vals.index(min_val)]
+                    ax.axhline(y=min_val, color='green', linestyle='--', alpha=0.5)
+                    ax.annotate(f'Best: {min_val:.4f} (epoch {min_epoch})',
+                                xy=(min_epoch, min_val),
+                                xytext=(min_epoch + 2, min_val + 0.1),
+                                fontsize=10, color='green')
+
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('Loss (PackedNLLLoss)')
+            ax.set_title('Training Progress')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+
+            # 保存图表
+            save_path = self.output_dir / 'training_curve.png'
+            plt.savefig(save_path, dpi=150)
+            print(f"\n  训练曲线已保存: {save_path}")
+
+            # 显示图表 (Spyder 会自动显示)
+            plt.show()
+
+        except Exception as e:
+            print(f"Warning: Could not plot training curve: {e}")
+            import traceback
+            traceback.print_exc()
+
+
+# =============================================================================
+# Live Plotting Callback (注释掉，太慢)
 # =============================================================================
 
 class LivePlotCallback(Callback):
@@ -162,6 +441,8 @@ class LivePlotCallback(Callback):
             loss = outputs['loss'].item()
         elif hasattr(trainer, 'callback_metrics') and 'train/PackedNLLLoss' in trainer.callback_metrics:
             loss = trainer.callback_metrics['train/PackedNLLLoss'].item()
+        elif hasattr(trainer, 'callback_metrics') and 'train_loss' in trainer.callback_metrics:
+            loss = trainer.callback_metrics['train_loss'].item()
         else:
             return
 
@@ -187,11 +468,16 @@ class LivePlotCallback(Callback):
         """记录验证loss"""
         if 'val/PackedNLLLoss' in trainer.callback_metrics:
             val_loss = trainer.callback_metrics['val/PackedNLLLoss'].item()
-            while len(self.val_losses) < len(self.train_losses) - 1:
-                self.val_losses.append(None)
-            self.val_losses.append(val_loss)
-            self._update_plot()
-            self._print_status(trainer)
+        elif 'val_loss' in trainer.callback_metrics:
+            val_loss = trainer.callback_metrics['val_loss'].item()
+        else:
+            return
+
+        while len(self.val_losses) < len(self.train_losses) - 1:
+            self.val_losses.append(None)
+        self.val_losses.append(val_loss)
+        self._update_plot()
+        self._print_status(trainer)
 
     def _print_status(self, trainer):
         """打印训练状态"""
@@ -213,6 +499,21 @@ class LivePlotCallback(Callback):
 
         if converged:
             print(f"  -> 模型接近收敛，可考虑停止训练")
+
+
+class MetricAliasCallback(Callback):
+    """
+    在 callback_metrics 中添加无斜杠的别名，便于日志和 checkpoint 命名。
+    """
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        metrics = trainer.callback_metrics
+        if 'val/PackedNLLLoss' in metrics:
+            metrics['val_loss'] = metrics['val/PackedNLLLoss']
+            metrics['val_PackedNLLLoss'] = metrics['val/PackedNLLLoss']
+        if 'train/PackedNLLLoss' in metrics:
+            metrics['train_loss'] = metrics['train/PackedNLLLoss']
+            metrics['train_PackedNLLLoss'] = metrics['train/PackedNLLLoss']
 
     def _update_plot(self):
         """更新训练曲线图"""
@@ -556,11 +857,12 @@ def train(
 
     # Callbacks
     callbacks = [
+        MetricAliasCallback(),
         LearningRateMonitor(logging_interval='step'),
         ModelCheckpoint(
             dirpath=run_dir / 'checkpoints',
             filename='best-{epoch:02d}-{val_loss:.4f}',
-            monitor='val/PackedNLLLoss',
+            monitor='val_loss',
             mode='min',
             save_top_k=3,
         ),
@@ -570,12 +872,12 @@ def train(
             every_n_epochs=1,
         ),
         EarlyStopping(
-            monitor='val/PackedNLLLoss',
+            monitor='val_loss',
             patience=patience,
             mode='min',
             verbose=True,
         ),
-        # LivePlotCallback(output_dir=run_dir, update_interval=10),
+        FinalPlotCallback(output_dir=run_dir),  # 训练结束时绘图
     ]
 
     # Loggers
@@ -722,9 +1024,10 @@ def finetune(
     print(f"  Warmup steps: {num_warmup_steps}")
     print(f"  Early stopping patience: {patience} epochs")
     
-    # 创建模型 - 使用MoiraiPretrain + 预训练权重进行领域适配
-    # 这样可以学习领域知识，同时支持多下游任务
-    model = MoiraiPretrain(
+    # 创建模型 - 使用MoiraiPretrainFixedVariate + 预训练权重进行领域适配
+    # 关键：使用固定的variate ID (randomize=False)，让模型学习变量间的物理关系
+    # 这样可以学习领域知识，同时支持多下游任务（forecasting和FDD）
+    model = MoiraiPretrainFixedVariate(
         module=pretrained_module,  # 传入预训练权重!
         min_patches=2,
         min_mask_ratio=0.15,
@@ -843,8 +1146,9 @@ def finetune(
             mode='min',
             verbose=True,
         ),
+        FinalPlotCallback(output_dir=run_dir),  # 训练结束时绘图
     ]
-    
+
     # Loggers
     tb_logger = TensorBoardLogger(save_dir=run_dir, name='tensorboard')
     csv_logger = CSVLogger(save_dir=run_dir, name='csv_logs')

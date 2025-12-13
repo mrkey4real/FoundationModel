@@ -33,17 +33,24 @@ STEPS_PER_HOUR = int(60 / _freq_minutes)
 STEPS_PER_DAY = int(24 * 60 / _freq_minutes)
 STEPS_PER_WEEK = int(7 * 24 * 60 / _freq_minutes)
 
-# Window configuration (in days for clarity)
-WINDOW_DAYS = 14        # Each sample covers 14 days
-STRIDE_DAYS = 7         # 50% overlap (slide by 7 days)
+# Window configuration
+# 原配置: WINDOW_DAYS=14, STRIDE_DAYS=7 → 只有30个样本，数据量严重不足
+# 新配置: WINDOW_DAYS=3, STRIDE_HOURS=6 → 预计~1300个样本，充足的训练数据
+#
+# 设计理由:
+# - 3天窗口 (288 timesteps @ 15min) 足以捕获日周期模式
+# - 6小时步长提供充足的数据量，同时保持样本多样性
+# - 目标：训练样本数 > 1000，让14M参数模型有足够数据学习
+WINDOW_DAYS = 3          # 每个样本覆盖3天 (对于15min数据 = 288步)
+STRIDE_HOURS = 6         # 每6小时滑动一次 (对于15min数据 = 24步)
 
 CONFIG = {
     'schema_path': '../config/hvac_schema.yaml',
     'input_csv': '../data/final_essential_merged_East_labview_egauge_15min.csv',
     'output_dir': '../data/buildingfm_processed_15min',
     'resample_freq': DATA_FREQ,
-    'window_size': WINDOW_DAYS * STEPS_PER_DAY,   # 14 days in steps
-    'stride': STRIDE_DAYS * STEPS_PER_DAY,        # 7 days in steps
+    'window_size': WINDOW_DAYS * STEPS_PER_DAY,      # 3天 = 288步
+    'stride': STRIDE_HOURS * STEPS_PER_HOUR,         # 6小时 = 24步
     'train_ratio': 0.7,        # 训练集比例
     'min_valid_ratio': 0.3,    # 每个窗口最小有效数据比例
     'output_format': 'both',   # 'arrow', 'jsonl', 'both'
