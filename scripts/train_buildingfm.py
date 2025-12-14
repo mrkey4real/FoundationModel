@@ -229,6 +229,73 @@ class UniversalMaskedPrediction(MapFuncMixin, CheckArrNDimMixin, Transformation)
         return prediction_mask
 
 
+@dataclass
+class CausalChainMaskedPrediction(MapFuncMixin, CheckArrNDimMixin, Transformation):
+    """
+    Causal-chain-aware masking to match downstream tasks:
+      - Forecast: mask last ~30% patches for non-weather vars, keep weather visible
+      - Virtual sensor / FDD: mask middle ~30% patches for ODU power
+      - Fallback: random masking (same behavior as UniversalMaskedPrediction)
+    """
+    prob_forecast: float = 0.4
+    prob_virtual: float = 0.4
+    forecast_mask_ratio: float = 0.3
+    virtual_mask_ratio: float = 0.3
+    min_mask_ratio: float = 0.15
+    max_mask_ratio: float = 0.5
+    min_var_ratio: float = 0.1
+    max_var_ratio: float = 0.5
+    weather_ids: tuple = tuple(range(0, 8))  # schema-aligned
+    odu_ids: tuple = (12, 13)               # schema-aligned
+    target_field: str = "target"
+    prediction_mask_field: str = "prediction_mask"
+    expected_ndim: int = 3  # (var, time, patch_size)
+
+    def __call__(self, data_entry: dict) -> dict:
+        target = data_entry[self.target_field]
+        prediction_mask = self._generate_prediction_mask(target)
+        data_entry[self.prediction_mask_field] = prediction_mask
+        return data_entry
+
+    def _generate_prediction_mask(self, target: np.ndarray) -> np.ndarray:
+        self.check_ndim("target", target, self.expected_ndim)
+        var, time = target.shape[:2]
+        mask = np.zeros((var, time), dtype=bool)
+
+        mode = np.random.rand()
+
+        # Forecast-style masking: hide future (last 30%) for non-weather vars
+        if mode < self.prob_forecast:
+            start = max(1, int(time * (1 - self.forecast_mask_ratio)))
+            non_weather = [v for v in range(var) if v not in self.weather_ids]
+            for v in non_weather:
+                mask[v, start:] = True
+            return mask
+
+        # Virtual-sensor / FDD: mask middle 30% for ODU power
+        if mode < self.prob_forecast + self.prob_virtual:
+            mid_start = int(time * 0.35)
+            mid_end = max(mid_start + 1, int(time * 0.65))
+            for v in self.odu_ids:
+                if v < var:
+                    mask[v, mid_start:mid_end] = True
+            return mask
+
+        # Fallback: random masking per-variate (original universal behavior)
+        var_ratio = np.random.uniform(self.min_var_ratio, self.max_var_ratio)
+        num_masked_vars = max(1, round(var * var_ratio))
+        masked_variates = np.random.choice(var, size=num_masked_vars, replace=False)
+
+        for v in masked_variates:
+            mask_ratio = np.random.uniform(self.min_mask_ratio, self.max_mask_ratio)
+            mask_length = max(1, int(time * mask_ratio))
+            start_idx = np.random.randint(0, max(1, time - mask_length + 1))
+            end_idx = start_idx + mask_length
+            mask[v, start_idx:end_idx] = True
+
+        return mask
+
+
 # =============================================================================
 # MoiraiPretrainFixedVariate - 禁用Variate ID随机化
 # =============================================================================
@@ -306,14 +373,18 @@ class MoiraiPretrainFixedVariate(MoiraiPretrain):
                     expected_ndim=3,
                     collection_type=dict,
                 )
-                # 使用 UniversalMaskedPrediction 进行通用随机 masking 训练
-                # 关键修改：随机选择部分 variates，每个随机选择一段时间区间
-                # 这样模型同时学会 forecasting、interpolation、cross-variate inference
-                + UniversalMaskedPrediction(
+                # 因果链感知的 masking，与评估任务对齐
+                + CausalChainMaskedPrediction(
+                    prob_forecast=0.4,
+                    prob_virtual=0.4,
+                    forecast_mask_ratio=0.3,
+                    virtual_mask_ratio=0.3,
                     min_mask_ratio=self.hparams.min_mask_ratio,
                     max_mask_ratio=self.hparams.max_mask_ratio,
                     min_var_ratio=0.1,   # 最少 mask 10% 的 variates
                     max_var_ratio=0.5,   # 最多 mask 50% 的 variates
+                    weather_ids=tuple(range(0, 8)),
+                    odu_ids=(12, 13),
                     target_field="target",
                     prediction_mask_field="prediction_mask",
                     expected_ndim=3,
