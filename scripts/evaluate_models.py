@@ -28,6 +28,19 @@ warnings.filterwarnings("ignore")
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+# Import unified configuration
+from buildingfm_config import (
+    cfg,
+    WEATHER_VAR_IDS,
+    FORECAST_TARGET_IDS,
+    ODU_POWER_VAR_IDS,
+    STEPS_PER_DAY,
+    STEPS_PER_HOUR,
+    CONTEXT_LENGTH,
+    PREDICTION_LENGTH,
+    SEASONAL_PERIOD,
+)
+
 from uni2ts.model.moirai import MoiraiModule  # type: ignore
 from uni2ts.distribution import (  # type: ignore
     LogNormalOutput,
@@ -38,7 +51,7 @@ from uni2ts.distribution import (  # type: ignore
 )
 
 # ----------------------------------------------------------------------------- #
-# Configuration
+# Configuration - Uses unified config from buildingfm_config.py
 # ----------------------------------------------------------------------------- #
 MODEL_SIZES = ["small", "base"]
 FINETUNE_PATTERNS = ["full", "freeze_ffn", "head_only"]
@@ -50,37 +63,31 @@ DISPLAY_NAMES = {
     "base_freeze_ffn": "Base-FreezeFNN",
     "base_head_only": "Base-HeadOnly",
 }
+# Simple runtime toggle (edit here, no CLI arg needed)
+USE_XGBOOST_BASELINE = False
 
-DATA_DIR = Path("../data/buildingfm_processed_15min")
-OUTPUT_DIR = Path("../outputs/evaluation_15min")
+# Paths from unified config
+DATA_DIR = cfg.data_dir
+OUTPUT_DIR = cfg.evaluation_output_dir
 
-DATA_FREQ = "15min"
+# Data frequency and derived values from unified config
+DATA_FREQ = cfg.data_freq
 _freq_minutes = pd.Timedelta(DATA_FREQ).total_seconds() / 60
-STEPS_PER_DAY = int(24 * 60 / _freq_minutes)
-STEPS_PER_HOUR = int(60 / _freq_minutes)
 
-CONTEXT_LENGTH = int(2 * STEPS_PER_DAY)
-PREDICTION_LENGTH = int(1 * STEPS_PER_DAY)
-PATCH_SIZE = 128
+# Patch size from unified config
+PATCH_SIZE = cfg.patch_size
+
+# Evaluation parameters
 NUM_SAMPLES = 20
 MAX_EVAL_SAMPLES = 30
 CONFIDENCE_LEVEL = 0.95
-SEASONAL_PERIOD = int(STEPS_PER_DAY)
 
-WEATHER_VAR_IDS = list(range(0, 8))
-FORECAST_TARGET_IDS = [10, 12, 30, 50]  # Representative IDs; filtered per sample
-ODU_POWER_VAR_IDS = list(range(12, 14))
+# Variable IDs are imported from buildingfm_config above:
+# - WEATHER_VAR_IDS
+# - FORECAST_TARGET_IDS
+# - ODU_POWER_VAR_IDS
+# - CONTEXT_LENGTH, PREDICTION_LENGTH, STEPS_PER_DAY, STEPS_PER_HOUR, SEASONAL_PERIOD
 
-FDD_SCENARIOS = {
-    "FDD-ODU": {
-        "target_ids": list(range(12, 14)),
-        "description": "Given Weather+Zone -> Reconstruct ODU Power",
-    },
-    "FDD-IDU": {
-        "target_ids": list(range(30, 34)),
-        "description": "Given Weather+ODU+Zone -> Reconstruct IDU Power",
-    },
-}
 
 
 # ----------------------------------------------------------------------------- #
@@ -457,6 +464,7 @@ def prepare_multivariate_input(
     prediction_mask = np.zeros((1, total_patches), dtype=bool)
     patch_size_tensor = np.full((1, total_patches), patch_size, dtype=np.int64)
 
+    # Virtual sensor: mask a middle slice (default 35%-65%) to probe causal filling
     vs_mask_start = int(total_length * 0.35) + pad_amount
     vs_mask_end = int(total_length * 0.65) + pad_amount
 
@@ -579,129 +587,6 @@ def predict_multivariate(
     return results
 
 
-def prepare_fill_in_blank_input(
-    full_data: np.ndarray,
-    observed_var_ids: List[int],
-    masked_var_ids: List[int],
-    context_length: int,
-    prediction_length: int,
-    patch_size: int,
-    max_patch_size: int,
-    device: str,
-    mask_start_ratio: float = 0.0,
-    mask_end_ratio: float = 1.0,
-) -> Tuple[torch.Tensor, ...]:
-    total_length = context_length + prediction_length
-    num_patches_per_var = (total_length + patch_size - 1) // patch_size
-    padded_len = num_patches_per_var * patch_size
-    pad_amount = max(0, padded_len - total_length)
-
-    total_vars = len(observed_var_ids) + len(masked_var_ids)
-    total_patches = total_vars * num_patches_per_var
-
-    mask_start_patch = int(num_patches_per_var * mask_start_ratio)
-    mask_end_patch = max(mask_start_patch + 1, int(num_patches_per_var * mask_end_ratio))
-
-    target = np.zeros((1, total_patches, max_patch_size), dtype=np.float32)
-    observed_mask = np.zeros_like(target, dtype=bool)
-    sample_id = np.ones((1, total_patches), dtype=np.int64)
-    time_id = np.zeros((1, total_patches), dtype=np.int64)
-    variate_id = np.zeros((1, total_patches), dtype=np.int64)
-    prediction_mask = np.zeros((1, total_patches), dtype=bool)
-    patch_size_tensor = np.full((1, total_patches), patch_size, dtype=np.int64)
-
-    patch_idx = 0
-    for var_id in observed_var_ids + masked_var_ids:
-        var_series = full_data[var_id, :total_length].astype(np.float32)
-        nan_mask = np.isnan(var_series)
-        clean = np.nan_to_num(var_series, nan=0.0)
-        if pad_amount:
-            clean = np.concatenate([np.zeros(pad_amount, dtype=np.float32), clean])
-            nan_mask = np.concatenate([np.ones(pad_amount, dtype=bool), nan_mask])
-
-        for p in range(num_patches_per_var):
-            start = p * patch_size
-            end = start + patch_size
-            target[0, patch_idx, :patch_size] = clean[start:end]
-            time_id[0, patch_idx] = p
-            variate_id[0, patch_idx] = var_id
-
-            if var_id in masked_var_ids and mask_start_patch <= p < mask_end_patch:
-                prediction_mask[0, patch_idx] = True
-            else:
-                observed_mask[0, patch_idx, :patch_size] = ~nan_mask[start:end]
-            patch_idx += 1
-
-    tensors = [
-        torch.tensor(target, device=device),
-        torch.tensor(observed_mask, device=device),
-        torch.tensor(sample_id, device=device),
-        torch.tensor(time_id, device=device),
-        torch.tensor(variate_id, device=device),
-        torch.tensor(prediction_mask, device=device),
-        torch.tensor(patch_size_tensor, device=device),
-    ]
-    return tuple(tensors)
-
-
-def predict_fill_in_blank(
-    module: MoiraiModule,
-    full_data: np.ndarray,
-    observed_var_ids: List[int],
-    masked_var_ids: List[int],
-    context_length: int,
-    prediction_length: int,
-    patch_size: int = PATCH_SIZE,
-    num_samples: int = NUM_SAMPLES,
-    device: str = "cpu",
-    mask_start_ratio: float = 0.0,
-    mask_end_ratio: float = 1.0,
-) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
-    max_patch_size = max(module.patch_sizes)
-    tensors = prepare_fill_in_blank_input(
-        full_data,
-        observed_var_ids,
-        masked_var_ids,
-        context_length,
-        prediction_length,
-        patch_size,
-        max_patch_size,
-        device,
-        mask_start_ratio,
-        mask_end_ratio,
-    )
-    target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size_tensor = tensors
-
-    module = module.to(device)
-    module.eval()
-
-    total_length = context_length + prediction_length
-    mask_start_idx = int(total_length * mask_start_ratio)
-    mask_end_idx = int(total_length * mask_end_ratio)
-
-    num_patches_per_var = (total_length + patch_size - 1) // patch_size
-    pad_amount = max(0, num_patches_per_var * patch_size - total_length)
-
-    with torch.no_grad():
-        distr = module(target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size_tensor)
-        samples = distr.sample((num_samples,))
-
-    results: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
-    base_patch = len(observed_var_ids) * num_patches_per_var
-
-    for i, var_id in enumerate(masked_var_ids):
-        start_patch = base_patch + i * num_patches_per_var
-        end_patch = start_patch + num_patches_per_var
-        var_samples = samples[:, 0, start_patch:end_patch, :patch_size].reshape(num_samples, -1).cpu().numpy()
-        if pad_amount > 0:
-            var_samples = var_samples[:, pad_amount:]
-        var_samples = var_samples[:, :total_length]
-        masked = var_samples[:, mask_start_idx:mask_end_idx]
-        point_pred = np.median(masked, axis=0)
-        results[var_id] = (point_pred, masked)
-    return results
-
-
 def find_best_window(var_data: np.ndarray, context_length: int, prediction_length: int, step: int = 100) -> int:
     total = context_length + prediction_length
     if len(var_data) < total:
@@ -804,12 +689,19 @@ def task1_standard_forecast(
     return aggregated
 
 
-def task2_virtual_sensor(
+def task2_fdd(
     moirai_models: Dict[str, MoiraiModule],
     test_hf: datasets.Dataset,
     max_samples: int,
     device: str,
 ) -> Dict[str, Dict[str, float]]:
+    """
+    FDD Task: Mask middle 35%-65% of target variables, predict from context,
+    then compare with ground truth to detect anomalies.
+
+    Returns both probabilistic metrics (SMAPE, MAE, CRPS, MSIS) and FDD-specific
+    metrics (Recon_MAE, Mean_Z, Max_Z, Anomaly_Rate).
+    """
     results: Dict[str, List[Dict[str, float]]] = {name: [] for name in moirai_models.keys()}
     for idx in range(min(len(test_hf), max_samples)):
         sample = test_hf[idx]
@@ -826,6 +718,7 @@ def task2_virtual_sensor(
         window = target[:, start : start + total_len]
         for model_name, module in moirai_models.items():
             try:
+                # Mask the middle slice (35%-65%) for FDD
                 preds = predict_multivariate(
                     module,
                     window,
@@ -833,7 +726,7 @@ def task2_virtual_sensor(
                     prediction_length=0,
                     weather_var_ids=WEATHER_VAR_IDS,
                     target_var_ids=valid_targets,
-                    task_type="virtual_sensor",
+                    task_type="virtual_sensor",  # reuse same masking logic
                     patch_size=PATCH_SIZE,
                     num_samples=NUM_SAMPLES,
                     device=device,
@@ -845,106 +738,28 @@ def task2_virtual_sensor(
                     mask_start = int(total_len * 0.35)
                     mask_end = int(total_len * 0.65)
                     truth = window[var_id, mask_start:mask_end]
-                    metrics = calculate_all_metrics(truth, point_pred, samples)
+                    # Calculate both probabilistic metrics and FDD metrics
+                    prob_metrics = calculate_all_metrics(truth, point_pred, samples)
+                    fdd_metrics = calculate_fdd_metrics(truth, point_pred, samples)
+                    # Merge both
+                    metrics = {**prob_metrics, **fdd_metrics}
                     results[model_name].append(metrics)
             except Exception as exc:
-                print(f"  Warning: virtual sensor failed for {model_name} on sample {idx}: {exc}")
+                print(f"  Warning: FDD failed for {model_name} on sample {idx}: {exc}")
                 continue
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     aggregated: Dict[str, Dict[str, float]] = {}
     for name, metric_list in results.items():
         if not metric_list:
-            aggregated[name] = {k: np.nan for k in ["SMAPE", "MAE", "CRPS", "MSIS", "wQL_mean"]}
+            aggregated[name] = {
+                "SMAPE": np.nan, "MAE": np.nan, "CRPS": np.nan, "MSIS": np.nan,
+                "Recon_MAE": np.nan, "Recon_SMAPE": np.nan,
+                "Mean_Z": np.nan, "Max_Z": np.nan, "Anomaly_Rate": np.nan,
+            }
             continue
         keys = set().union(*metric_list)
         aggregated[name] = {k: float(np.nanmean([m.get(k, np.nan) for m in metric_list])) for k in keys}
-    return aggregated
-
-
-def task3_fdd(
-    models: Dict[str, object],
-    test_hf: datasets.Dataset,
-    max_samples: int,
-    device: str,
-) -> Dict[str, Dict[str, Dict[str, float]]]:
-    seasonal_naive = SeasonalNaiveModel()
-    results: Dict[str, Dict[str, List[Dict[str, float]]]] = {
-        scenario: {name: [] for name in models.keys()} for scenario in FDD_SCENARIOS
-    }
-    for idx in range(min(len(test_hf), max_samples)):
-        sample = test_hf[idx]
-        target = np.array(sample["target"])
-        num_variates = target.shape[0]
-
-        for scenario_name, scenario in FDD_SCENARIOS.items():
-            target_ids = filter_var_ids(scenario["target_ids"], num_variates)
-            if not target_ids:
-                continue
-            context_ids = [v for v in range(num_variates) if v not in target_ids]
-            window_len = CONTEXT_LENGTH + PREDICTION_LENGTH
-            start_idx = find_best_window(target[target_ids[0]], CONTEXT_LENGTH, PREDICTION_LENGTH)
-            end_idx = start_idx + window_len
-            if end_idx > target.shape[1]:
-                continue
-            window = target[:, start_idx:end_idx]
-
-            if "Seasonal Naive" in models:
-                for var_id in target_ids:
-                    series = window[var_id]
-                    mean_val = np.nanmean(series)
-                    if np.isnan(mean_val):
-                        continue
-                    baseline = np.full_like(series, mean_val)
-                    metrics = calculate_fdd_metrics(series, baseline, None)
-                    results[scenario_name]["Seasonal Naive"].append(metrics)
-
-            moirai_models = {k: v for k, v in models.items() if isinstance(v, MoiraiModule)}
-            for model_name, module in moirai_models.items():
-                try:
-                    preds = predict_fill_in_blank(
-                        module,
-                        window,
-                        observed_var_ids=context_ids,
-                        masked_var_ids=target_ids,
-                        context_length=CONTEXT_LENGTH,
-                        prediction_length=PREDICTION_LENGTH,
-                        patch_size=PATCH_SIZE,
-                        num_samples=NUM_SAMPLES,
-                        device=device,
-                        mask_start_ratio=0.0,
-                        mask_end_ratio=1.0,
-                    )
-                    for var_id in target_ids:
-                        if var_id not in preds:
-                            continue
-                        point_pred, samples = preds[var_id]
-                        truth = window[var_id, : len(point_pred)]
-                        metrics = calculate_fdd_metrics(truth, point_pred, samples)
-                        results[scenario_name][model_name].append(metrics)
-                except Exception as exc:
-                    print(f"  Warning: FDD failed for {model_name} ({scenario_name}) on sample {idx}: {exc}")
-                    continue
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    aggregated: Dict[str, Dict[str, Dict[str, float]]] = {}
-    for scenario, model_dict in results.items():
-        aggregated[scenario] = {}
-        for model_name, metric_list in model_dict.items():
-            if not metric_list:
-                aggregated[scenario][model_name] = {
-                    "Recon_MAE": np.nan,
-                    "Recon_SMAPE": np.nan,
-                    "Mean_Z": np.nan,
-                    "Max_Z": np.nan,
-                    "Anomaly_Rate": np.nan,
-                }
-                continue
-            keys = set().union(*metric_list)
-            aggregated[scenario][model_name] = {
-                k: float(np.nanmean([m.get(k, np.nan) for m in metric_list])) for k in keys
-            }
     return aggregated
 
 
@@ -1012,28 +827,38 @@ def plot_task_metrics_grid(task_name: str, metrics: Dict[str, Dict[str, float]],
     plt.close(fig)
 
 
-def plot_fdd_matrices(fdd_results: Dict[str, Dict[str, Dict[str, float]]], output_dir: Path) -> None:
-    if not fdd_results:
+def plot_fdd_specific_metrics(task_name: str, metrics: Dict[str, Dict[str, float]], output_dir: Path) -> None:
+    """Plot FDD-specific metrics: Mean_Z, Max_Z, Anomaly_Rate."""
+    if not metrics:
         return
-    scenarios = list(fdd_results.keys())
-    models = sorted({m for scen in fdd_results.values() for m in scen.keys()})
-    for metric_key in ["Recon_MAE", "Recon_SMAPE"]:
-        data = np.full((len(scenarios), len(models)), np.nan)
-        for i, scen in enumerate(scenarios):
-            for j, model in enumerate(models):
-                data[i, j] = fdd_results.get(scen, {}).get(model, {}).get(metric_key, np.nan)
-        fig, ax = plt.subplots(figsize=(10, 4 + 0.6 * len(scenarios)))
-        im = ax.imshow(data, cmap="YlGnBu", aspect="auto")
-        ax.set_xticks(np.arange(len(models)))
+    fdd_keys = ["Recon_MAE", "Mean_Z", "Max_Z", "Anomaly_Rate"]
+    models = list(metrics.keys())
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    axes = axes.flatten()
+    for ax, key in zip(axes, fdd_keys):
+        values = [metrics[m].get(key, np.nan) for m in models]
+        colors = plt.get_cmap("tab10")(np.linspace(0, 1, len(models)))
+        bars = ax.bar(models, values, color=colors)
+        ax.set_title(key)
         ax.set_xticklabels(models, rotation=25, ha="right")
-        ax.set_yticks(np.arange(len(scenarios)))
-        ax.set_yticklabels(scenarios)
-        ax.set_title(f"FDD {metric_key}")
-        fig.colorbar(im, ax=ax, fraction=0.04, pad=0.04)
-        ensure_dir(output_dir)
-        plt.tight_layout()
-        plt.savefig(output_dir / f"fdd_{metric_key.lower()}.png", dpi=180)
-        plt.close(fig)
+        ax.grid(True, axis="y", alpha=0.2, linestyle="--")
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+        for bar, val in zip(bars, values):
+            if not np.isnan(val):
+                ax.annotate(
+                    f"{val:.3f}",
+                    xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                    xytext=(0, 3),
+                    textcoords="offset points",
+                    ha="center",
+                    fontsize=8,
+                    rotation=45,
+                )
+    plt.suptitle(f"{task_name} FDD-Specific Metrics", fontweight="bold")
+    plt.tight_layout()
+    ensure_dir(output_dir)
+    plt.savefig(output_dir / f"{task_name.lower()}_fdd_metrics.png", dpi=180)
+    plt.close(fig)
 
 
 def plot_single_task_item(
@@ -1047,10 +872,18 @@ def plot_single_task_item(
         return
 
     all_values: List[float] = []
-    for _, (context, truth, pred, samples) in model_predictions.items():
+    max_total_len = 0
+    for _, entry in model_predictions.items():
+        context, truth, pred, samples, *_ = (*entry, None)  # allow optional mask info
         all_values.extend(context[~np.isnan(context)])
         all_values.extend(truth[~np.isnan(truth)])
         all_values.extend(pred[~np.isnan(pred)])
+        if len(entry) == 5 and isinstance(entry[4], tuple):
+            _, _, _, _, mask_bounds = entry  # type: ignore
+            total_len_local = mask_bounds[2]
+        else:
+            total_len_local = len(context) + len(pred)
+        max_total_len = max(max_total_len, total_len_local)
 
     if not all_values:
         return
@@ -1064,11 +897,29 @@ def plot_single_task_item(
     fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 4.2 * nrows))
     axes_arr = np.array(axes).reshape(-1) if n_models > 1 else np.array([axes])
 
-    for ax, (model_name, (context, truth, pred, samples)) in zip(axes_arr, model_predictions.items()):
-        ctx_len = len(context)
-        time_axis = np.arange(ctx_len + len(pred))
-        ctx_time = time_axis[:ctx_len]
-        pred_time = time_axis[ctx_len : ctx_len + len(pred)]
+    for ax, (model_name, entry) in zip(axes_arr, model_predictions.items()):
+        # Support optional mask bounds: (context, truth, pred, samples, (mask_start, mask_end, total_len))
+        if len(entry) == 5 and isinstance(entry[4], tuple):
+            context, truth, pred, samples, mask_bounds = entry  # type: ignore
+        else:
+            context, truth, pred, samples = entry  # type: ignore
+            mask_bounds = None
+
+        if mask_bounds:
+            mask_start, mask_end, total_len_local = mask_bounds
+            ctx_len = len(context)
+            total_len = max(total_len_local, max_total_len)
+            time_axis = np.arange(total_len)
+            ctx_time = time_axis[:ctx_len]
+            pred_time = time_axis[mask_start : mask_start + len(pred)]
+            mask_region = (mask_start, mask_end)
+        else:
+            ctx_len = len(context)
+            total_len = max_total_len if max_total_len else (ctx_len + len(pred))
+            time_axis = np.arange(total_len)
+            ctx_time = time_axis[:ctx_len]
+            pred_time = time_axis[ctx_len : ctx_len + len(pred)]
+            mask_region = None
         ax.plot(ctx_time, context, color="#7f8c8d", alpha=0.6, lw=1.2, label="Context")
         if samples is not None and len(samples) > 1:
             p5 = np.percentile(samples, 5, axis=0)
@@ -1077,9 +928,16 @@ def plot_single_task_item(
             p75 = np.percentile(samples, 75, axis=0)
             ax.fill_between(pred_time, p5, p95, color="#c0392b", alpha=0.1, label="90% CI")
             ax.fill_between(pred_time, p25, p75, color="#c0392b", alpha=0.18, label="50% CI")
+        if mask_region:
+            ax.axvspan(mask_region[0], mask_region[1], color="#f1c40f", alpha=0.08, label="Masked region")
         ax.plot(pred_time, truth[: len(pred_time)], color="#27ae60", lw=2, label="Truth")
         ax.plot(pred_time, pred[: len(pred_time)], color="#c0392b", linestyle="--", lw=2, label="Pred")
-        ax.axvline(ctx_len, color="#95a5a6", linestyle=":", lw=1.2)
+        if mask_region:
+            ax.axvline(mask_region[0], color="#95a5a6", linestyle=":", lw=1.0)
+            ax.axvline(mask_region[1], color="#95a5a6", linestyle=":", lw=1.0, alpha=0.5)
+        else:
+            ax.axvline(ctx_len, color="#95a5a6", linestyle=":", lw=1.2)
+        ax.set_xlim(0, total_len)
         smape = calculate_smape(truth[: len(pred_time)], pred[: len(pred_time)])
         title = f"{model_name}\nSMAPE={smape:.2f}"
         if samples is not None and len(samples) > 1:
@@ -1119,7 +977,7 @@ def plot_task_samples(
         total_len = CONTEXT_LENGTH + PREDICTION_LENGTH
         start_idx = find_best_window(target[var_id], CONTEXT_LENGTH, PREDICTION_LENGTH)
         window = target[:, start_idx : start_idx + total_len]
-        preds: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]] = {}
+        preds: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Tuple[int, int, int]]] = {}
         seasonal_naive = SeasonalNaiveModel()
         for name, model in models.items():
             try:
@@ -1127,12 +985,12 @@ def plot_task_samples(
                     ctx = window[var_id, :CONTEXT_LENGTH]
                     truth = window[var_id, CONTEXT_LENGTH:]
                     pred, _ = seasonal_naive.predict(ctx, PREDICTION_LENGTH)
-                    preds[name] = (ctx, truth, pred, None)
+                    preds[name] = (ctx, truth, pred, None, (CONTEXT_LENGTH, CONTEXT_LENGTH + len(pred), total_len))
                 elif isinstance(model, XGBoostModel):
                     ctx = window[var_id, :CONTEXT_LENGTH]
                     truth = window[var_id, CONTEXT_LENGTH:]
                     pred, _ = model.predict(ctx, PREDICTION_LENGTH)
-                    preds[name] = (ctx, truth, pred, None)
+                    preds[name] = (ctx, truth, pred, None, (CONTEXT_LENGTH, CONTEXT_LENGTH + len(pred), total_len))
                 elif isinstance(model, MoiraiModule):
                     res = predict_multivariate(
                         model,
@@ -1152,6 +1010,7 @@ def plot_task_samples(
                         window[var_id, CONTEXT_LENGTH:],
                         point_pred,
                         samples,
+                        (CONTEXT_LENGTH, CONTEXT_LENGTH + len(point_pred), total_len),
                     )
             except Exception:
                 continue
@@ -1160,14 +1019,14 @@ def plot_task_samples(
                 "Task1 Forecast", f"Var {var_id}", preds, output_dir / "samples" / f"task1_var{var_id}.png"
             )
 
-    # Task 2 sample: virtual sensor (ODU power)
-    vs_ids = filter_var_ids(ODU_POWER_VAR_IDS, target.shape[0])
-    if vs_ids:
-        var_id = vs_ids[0]
+    # Task 2 sample: FDD (mask middle 35%-65%)
+    fdd_ids = filter_var_ids(ODU_POWER_VAR_IDS, target.shape[0])
+    if fdd_ids:
+        var_id = fdd_ids[0]
         total_len = CONTEXT_LENGTH
         start_idx = find_best_window(target[var_id], CONTEXT_LENGTH, 0)
         window = target[:, start_idx : start_idx + total_len]
-        preds_vs: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]] = {}
+        preds_fdd: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Tuple[int, int, int]]] = {}
         for name, model in models.items():
             if not isinstance(model, MoiraiModule):
                 continue
@@ -1179,7 +1038,7 @@ def plot_task_samples(
                     prediction_length=0,
                     weather_var_ids=WEATHER_VAR_IDS,
                     target_var_ids=[var_id],
-                    task_type="virtual_sensor",
+                    task_type="virtual_sensor",  # reuse same masking logic
                     patch_size=PATCH_SIZE,
                     num_samples=NUM_SAMPLES,
                     device=device,
@@ -1190,58 +1049,21 @@ def plot_task_samples(
                 mask_start = int(total_len * 0.35)
                 mask_end = int(total_len * 0.65)
                 truth = window[var_id, mask_start:mask_end]
-                preds_vs[name] = (
-                    window[var_id, :mask_start],
+                preds_fdd[name] = (
+                    window[var_id, :total_len],  # full context (both sides visible)
                     truth,
                     point_pred,
                     samples,
+                    (mask_start, mask_end, total_len),
                 )
-            except Exception:
-                continue
-        if preds_vs:
-            plot_single_task_item(
-                "Task2 Virtual Sensor",
-                f"ODU Power (var {var_id})",
-                preds_vs,
-                output_dir / "samples" / f"task2_var{var_id}.png",
-            )
-
-    # Task 3 sample: FDD ODU reconstruction
-    fdd_ids = filter_var_ids(FDD_SCENARIOS["FDD-ODU"]["target_ids"], target.shape[0])
-    if fdd_ids:
-        var_id = fdd_ids[0]
-        total_len = CONTEXT_LENGTH + PREDICTION_LENGTH
-        start_idx = find_best_window(target[var_id], CONTEXT_LENGTH, PREDICTION_LENGTH)
-        window = target[:, start_idx : start_idx + total_len]
-        preds_fdd: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]] = {}
-        for name, model in models.items():
-            if not isinstance(model, MoiraiModule):
-                continue
-            try:
-                res = predict_fill_in_blank(
-                    model,
-                    window,
-                    observed_var_ids=[v for v in range(window.shape[0]) if v not in fdd_ids],
-                    masked_var_ids=[var_id],
-                    context_length=CONTEXT_LENGTH,
-                    prediction_length=PREDICTION_LENGTH,
-                    patch_size=PATCH_SIZE,
-                    num_samples=NUM_SAMPLES,
-                    device=device,
-                    mask_start_ratio=0.0,
-                    mask_end_ratio=1.0,
-                )
-                point_pred, samples = res[var_id]
-                truth = window[var_id, : len(point_pred)]
-                preds_fdd[name] = (window[var_id, :CONTEXT_LENGTH], truth, point_pred, samples)
             except Exception:
                 continue
         if preds_fdd:
             plot_single_task_item(
-                "Task3 FDD",
-                f"ODU Recon (var {var_id})",
+                "Task2 FDD",
+                f"ODU Power (var {var_id})",
                 preds_fdd,
-                output_dir / "samples" / f"task3_var{var_id}.png",
+                output_dir / "samples" / f"task2_var{var_id}.png",
             )
 
 
@@ -1274,16 +1096,17 @@ def main():
     print("[2/4] Loading models...")
     models: Dict[str, object] = {}
     model_dirs: List[Path] = []
-    output_model_dir = Path("../outputs/buildingfm_15min")
+    output_model_dir = Path("../outputs/buildingfm_lite_15min")
 
     # Baselines
     models["Seasonal Naive"] = SeasonalNaiveModel()
-    xgb_path = Path("../outputs/baselines_15min") / "xgboost_model.joblib"
-    if xgb_path.exists():
-        models["XGBoost"] = XGBoostModel(xgb_path)
-        print(f"  Loaded XGBoost baseline from {xgb_path.name}")
-    else:
-        print("  XGBoost baseline not found, skipping.")
+    if USE_XGBOOST_BASELINE:
+        xgb_path = Path("../outputs/baselines_15min") / "xgboost_model.joblib"
+        if xgb_path.exists():
+            models["XGBoost"] = XGBoostModel(xgb_path)
+            print(f"  Loaded XGBoost baseline from {xgb_path.name}")
+        else:
+            print("  XGBoost baseline not found, skipping.")
 
     discovered = discover_all_models(output_model_dir)
 
@@ -1345,20 +1168,16 @@ def main():
 
     moirai_models = {k: v for k, v in models.items() if isinstance(v, MoiraiModule)}
 
-    print("[3/4] Running tasks...")
+    print("[3/3] Running tasks...")
     results: Dict[str, object] = {}
 
     print("  Task 1: Standard forecast")
     task1 = task1_standard_forecast(models, test_hf, FORECAST_TARGET_IDS, args.max_samples, device)
     results["task1"] = task1
 
-    print("  Task 2: Virtual sensor")
-    task2 = task2_virtual_sensor(moirai_models, test_hf, args.max_samples, device)
+    print("  Task 2: FDD (mask middle 35%-65%)")
+    task2 = task2_fdd(moirai_models, test_hf, args.max_samples, device)
     results["task2"] = task2
-
-    print("  Task 3: FDD")
-    task3 = task3_fdd(models, test_hf, args.max_samples, device)
-    results["task3"] = task3
 
     output_dir = OUTPUT_DIR
     ensure_dir(output_dir)
@@ -1370,8 +1189,8 @@ def main():
     plot_training_curves(model_dirs, output_dir)
     plot_task_metrics_grid("Task1_Forecast", task1, output_dir)
     if task2:
-        plot_task_metrics_grid("Task2_VirtualSensor", task2, output_dir)
-    plot_fdd_matrices(task3, output_dir)
+        plot_task_metrics_grid("Task2_FDD", task2, output_dir)
+        plot_fdd_specific_metrics("Task2_FDD", task2, output_dir)
     plot_task_samples(models, test_hf, output_dir, device)
 
     print("Done.")

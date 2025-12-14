@@ -403,14 +403,15 @@ EXECUTION_ORDER: List[str] = [
 
 
 # =============================================================================
-# 路径配置
+# 路径配置 - Uses unified config from buildingfm_config.py
 # =============================================================================
 
-# 自动检测项目根目录
+from buildingfm_config import cfg
+
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
-DATA_DIR = PROJECT_ROOT / 'data' / 'buildingfm_processed_15min'
-OUTPUT_DIR = PROJECT_ROOT / 'outputs' / 'buildingfm_15min'
+DATA_DIR = cfg.data_dir
+OUTPUT_DIR = cfg.output_dir
 RESULTS_FILE = OUTPUT_DIR / 'experiment_results.csv'
 
 

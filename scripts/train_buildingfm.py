@@ -6,7 +6,7 @@ BuildingFM Training Script - Spyder Friendly Version
 
 使用方法:
     1. 首次运行: 设置 RUN_MODE = 'build' 来构建数据集
-    2. 从零训练: 设置 RUN_MODE = 'train' 
+    2. 从零训练: 设置 RUN_MODE = 'train'
     3. 微调预训练: 设置 RUN_MODE = 'finetune' (推荐!)
 """
 
@@ -25,17 +25,20 @@ import torch
 import datasets
 from datasets import Features, Sequence, Value
 
+# Import unified configuration
+from buildingfm_config import cfg
+
 # =============================================================================
 # 配置参数 - 只需修改这一个区块！
 # =============================================================================
 
 CONFIG = {
     # -------------------------------------------------------------------------
-    # 基础设置
+    # 基础设置 (paths from unified config)
     # -------------------------------------------------------------------------
     'mode': 'finetune',        # 'build' | 'train' | 'finetune'
-    'data_dir': '../data/buildingfm_processed_15min',
-    'output_dir': '../outputs/buildingfm_15min',
+    'data_dir': str(cfg.data_dir),
+    'output_dir': str(cfg.output_dir),
     
     # -------------------------------------------------------------------------
     # 微调配置 (mode='finetune' 时使用) - 推荐!
@@ -51,13 +54,13 @@ CONFIG = {
         # small: 14M参数, 4-6GB显存, 快速实验 (推荐先用small验证)
         # base:  91M参数, 8-12GB显存, 生产环境推荐
         # large: 300M参数, 16GB+显存, 追求极致
-        'pretrained': 'small',  # 改为small，先快速验证
+        'pretrained': 'base',  # 改为small，先快速验证
 
         # 微调策略: 'full' | 'freeze_ffn' | 'head_only'
         # head_only:  只训练输出头 (最快，验证训练正常)
         # freeze_ffn: 冻结FFN层 (推荐起点，平衡效果和稳定性)
         # full:       全参数微调 (效果最好但易过拟合)
-        'pattern': 'head_only',
+        'pattern': 'freeze_ffn',
 
         # 输出目录命名: 自动生成为 moirai_{pretrained}_{pattern}
         # 例如: moirai_base_full, moirai_small_freeze_ffn
@@ -147,7 +150,7 @@ from uni2ts.transform import (
 )
 from uni2ts.transform._base import Transformation
 from uni2ts.transform._mixin import MapFuncMixin, CheckArrNDimMixin
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 # =============================================================================
@@ -236,6 +239,8 @@ class CausalChainMaskedPrediction(MapFuncMixin, CheckArrNDimMixin, Transformatio
       - Forecast: mask last ~30% patches for non-weather vars, keep weather visible
       - Virtual sensor / FDD: mask middle ~30% patches for ODU power
       - Fallback: random masking (same behavior as UniversalMaskedPrediction)
+
+    Variable IDs are loaded from unified config (buildingfm_config.py).
     """
     prob_forecast: float = 0.4
     prob_virtual: float = 0.4
@@ -245,8 +250,9 @@ class CausalChainMaskedPrediction(MapFuncMixin, CheckArrNDimMixin, Transformatio
     max_mask_ratio: float = 0.5
     min_var_ratio: float = 0.1
     max_var_ratio: float = 0.5
-    weather_ids: tuple = tuple(range(0, 8))  # schema-aligned
-    odu_ids: tuple = (12, 13)               # schema-aligned
+    # Variable IDs from unified config
+    weather_ids: tuple = field(default_factory=lambda: cfg.get_train_weather_ids())
+    odu_ids: tuple = field(default_factory=lambda: cfg.get_train_odu_ids())
     target_field: str = "target"
     prediction_mask_field: str = "prediction_mask"
     expected_ndim: int = 3  # (var, time, patch_size)
@@ -374,6 +380,7 @@ class MoiraiPretrainFixedVariate(MoiraiPretrain):
                     collection_type=dict,
                 )
                 # 因果链感知的 masking，与评估任务对齐
+                # Variable IDs from unified config (buildingfm_config.py)
                 + CausalChainMaskedPrediction(
                     prob_forecast=0.4,
                     prob_virtual=0.4,
@@ -383,8 +390,8 @@ class MoiraiPretrainFixedVariate(MoiraiPretrain):
                     max_mask_ratio=self.hparams.max_mask_ratio,
                     min_var_ratio=0.1,   # 最少 mask 10% 的 variates
                     max_var_ratio=0.5,   # 最多 mask 50% 的 variates
-                    weather_ids=tuple(range(0, 8)),
-                    odu_ids=(12, 13),
+                    weather_ids=cfg.get_train_weather_ids(),
+                    odu_ids=cfg.get_train_odu_ids(),
                     target_field="target",
                     prediction_mask_field="prediction_mask",
                     expected_ndim=3,

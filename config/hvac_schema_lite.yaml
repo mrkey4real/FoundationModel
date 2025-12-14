@@ -1,0 +1,123 @@
+schema_version: "1.0_lite"
+building_id: "East"
+
+# 物理因果链精简版 (Total: 24 vars)
+# 0-1: Weather (输入)
+# 2-3: Power (系统响应)
+# 4-7: IDU System (中间状态)
+# 8-15: Zone Temps (最终输出 - 每个房间选1个代表性传感器)
+# 16-23: Solar Flux (外部干扰 - 每个房间选1个方向)
+
+variables:
+  # === Weather (2 vars) ===
+  0:
+    name: outdoor_air_temperature
+    original_column: "labview_Air Temperature [degC]"
+    group: "weather"
+  1:
+    name: outdoor_relative_humidity
+    original_column: "labview_Relative Humidity [%]"
+    group: "weather"
+
+  # === Power (2 vars) ===
+  2:
+    name: outdoor_unit_power
+    original_column: "egauge_Outdoor Unit [kW]"
+    group: "odu"
+  3:
+    name: indoor_unit_power
+    original_column: "egauge_Indoor Unit [kW]"
+    group: "idu"
+
+  # === IDU System (4 vars) ===
+  4:
+    name: supply_temp_avg
+    original_column: "labview_SV2" # 选取一个代表性的送风温度
+    group: "system"
+  5:
+    name: return_air_temp
+    original_column: "labview_IDU Return Air"
+    group: "system"
+  6:
+    name: coil_outlet_temp
+    original_column: "labview_IDU CoilOut"
+    group: "system"
+  7:
+    name: thermostat_setpoint
+    original_column: "labview_Thermostat"
+    group: "system"
+
+  # === Zone Temps (8 vars - 每个区域选传感器A1, B1...作为代表) ===
+  8:
+    name: zone_a_temp
+    original_column: "labview_A1"
+    group: "zones"
+  9:
+    name: zone_b_temp
+    original_column: "labview_B1"
+    group: "zones"
+  10:
+    name: zone_c_temp
+    original_column: "labview_C1"
+    group: "zones"
+  11:
+    name: zone_d_temp
+    original_column: "labview_D1"
+    group: "zones"
+  12:
+    name: zone_e_temp
+    original_column: "labview_E1"
+    group: "zones"
+  13:
+    name: zone_f_temp
+    original_column: "labview_F1"
+    group: "zones"
+  14:
+    name: zone_g_temp
+    original_column: "labview_G1"
+    group: "zones"
+  15:
+    name: zone_h_temp
+    original_column: "labview_H1"
+    group: "zones"
+
+  # === Solar Flux (8 vars - 每个区域选Top窗口) ===
+  16:
+    name: zone_a_solar
+    original_column: "labview_A_Top_HF [W/m^2]"
+    group: "solar"
+  17:
+    name: zone_b_solar
+    original_column: "labview_B_Top_HF [W/m^2]"
+    group: "solar"
+  18:
+    name: zone_c_solar
+    original_column: "labview_C_Top_HF [W/m^2]"
+    group: "solar"
+  19:
+    name: zone_d_solar
+    original_column: "labview_D_Top_HF [W/m^2]"
+    group: "solar"
+  20:
+    name: zone_e_solar
+    original_column: "labview_E_Top_HF [W/m^2]"
+    group: "solar"
+  21:
+    name: zone_f_solar
+    original_column: "labview_F_Top_HF [W/m^2]"
+    group: "solar"
+  22:
+    name: zone_g_solar
+    original_column: "labview_G_Top_HF [W/m^2]"
+    group: "solar"
+  23:
+    name: zone_h_solar
+    original_column: "labview_H_Top_HF [W/m^2]"
+    group: "solar"
+
+groups:
+  weather: {id_range: [0, 1], count: 2}
+  odu: {id_range: [2, 2], count: 1}
+  idu: {id_range: [3, 7], count: 5}
+  zones: {id_range: [8, 15], count: 8}
+  solar: {id_range: [16, 23], count: 8}

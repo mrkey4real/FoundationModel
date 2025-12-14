@@ -36,16 +36,22 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 # Configuration
 # =============================================================================
 
-DATA_DIR = Path('../data/buildingfm_processed_15min')
-OUTPUT_DIR = Path('../outputs/baselines_15min')
+# DATA_DIR = Path('../data/buildingfm_processed_15min')
+# OUTPUT_DIR = Path('../outputs/baselines_15min')
+DATA_DIR = Path('../data/buildingfm_processed_lite_15min')
+OUTPUT_DIR = Path('../outputs/baselines_lite_15min')
 
 # Variable groups to train (same as evaluation)
 TRAIN_GROUPS = {
-    'Main Power': {'id_range': (10, 11), 'unit': 'kW'},
-    'ODU Power': {'id_range': (12, 13), 'unit': 'kW'},
-    'IDU Power': {'id_range': (30, 33), 'unit': 'kW'},
-    'Zone Temps': {'id_range': (50, 61), 'unit': '°C'},
-    'IAQ': {'id_range': (98, 101), 'unit': 'ppm/ug'},
+    # 'Main Power': {'id_range': (10, 11), 'unit': 'kW'},
+    # 'ODU Power': {'id_range': (12, 13), 'unit': 'kW'},
+    # 'IDU Power': {'id_range': (30, 33), 'unit': 'kW'},
+    # 'Zone Temps': {'id_range': (50, 61), 'unit': '°C'},
+    # 'IAQ': {'id_range': (98, 101), 'unit': 'ppm/ug'},
+    'Main Power': {'id_range': (2,), 'unit': 'kW'},
+    'ODU Power': {'id_range': (2,), 'unit': 'kW'},
+    'IDU Power': {'id_range': (3,), 'unit': 'kW'},
+    'Zone Temps': {'id_range': (8, 15), 'unit': '°C'},
 }
 
 # =============================================================================

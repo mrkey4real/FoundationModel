@@ -19,7 +19,13 @@
       "Bash(C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe -m py_compile:*)",
       "Bash(python -m py_compile:*)",
       "Bash(python -c \"import sys; sys.path.insert(0, ''src''); exec(open(''scripts/evaluate_models.py'').read().split(''def main'')[0]); print(''Import check passed'')\")",
-      "Bash(timeout 30 python:*)"
+      "Bash(timeout 30 python:*)",
+      "Bash(dir:*)",
+      "Bash(C:ProgramDataanaconda3envsfmpython.exe buildingfm_config.py)",
+      "Bash(pushd:*)",
+      "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\" buildingfm_config.py)",
+      "Bash(popd)",
+      "Bash(\"C:\\ProgramData\\anaconda3\\envs\\fm\\python.exe\" -c:*)"
     ],
     "deny": [],
     "ask": []
