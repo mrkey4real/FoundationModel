@@ -690,7 +690,7 @@ def task1_standard_forecast(
 
 
 def task2_fdd(
-    moirai_models: Dict[str, MoiraiModule],
+    models: Dict[str, object],
     test_hf: datasets.Dataset,
     max_samples: int,
     device: str,
@@ -702,7 +702,8 @@ def task2_fdd(
     Returns both probabilistic metrics (SMAPE, MAE, CRPS, MSIS) and FDD-specific
     metrics (Recon_MAE, Mean_Z, Max_Z, Anomaly_Rate).
     """
-    results: Dict[str, List[Dict[str, float]]] = {name: [] for name in moirai_models.keys()}
+    seasonal_naive = SeasonalNaiveModel()
+    results: Dict[str, List[Dict[str, float]]] = {name: [] for name in models.keys()}
     for idx in range(min(len(test_hf), max_samples)):
         sample = test_hf[idx]
         target = np.array(sample["target"])
@@ -716,34 +717,50 @@ def task2_fdd(
         var_data = target[valid_targets[0]]
         start = find_best_window(var_data, CONTEXT_LENGTH, 0)
         window = target[:, start : start + total_len]
-        for model_name, module in moirai_models.items():
+        mask_start = int(total_len * 0.35)
+        mask_end = int(total_len * 0.65)
+        for model_name, model in models.items():
             try:
-                # Mask the middle slice (35%-65%) for FDD
-                preds = predict_multivariate(
-                    module,
-                    window,
-                    context_length=CONTEXT_LENGTH,
-                    prediction_length=0,
-                    weather_var_ids=WEATHER_VAR_IDS,
-                    target_var_ids=valid_targets,
-                    task_type="virtual_sensor",  # reuse same masking logic
-                    patch_size=PATCH_SIZE,
-                    num_samples=NUM_SAMPLES,
-                    device=device,
-                )
-                for var_id in valid_targets:
-                    if var_id not in preds:
-                        continue
-                    point_pred, samples = preds[var_id]
-                    mask_start = int(total_len * 0.35)
-                    mask_end = int(total_len * 0.65)
-                    truth = window[var_id, mask_start:mask_end]
-                    # Calculate both probabilistic metrics and FDD metrics
-                    prob_metrics = calculate_all_metrics(truth, point_pred, samples)
-                    fdd_metrics = calculate_fdd_metrics(truth, point_pred, samples)
-                    # Merge both
-                    metrics = {**prob_metrics, **fdd_metrics}
-                    results[model_name].append(metrics)
+                if model_name == "Seasonal Naive":
+                    # For Seasonal Naive: use values from one day ago to fill masked region
+                    for var_id in valid_targets:
+                        series = window[var_id]
+                        truth = series[mask_start:mask_end]
+                        # Use values from SEASONAL_PERIOD steps earlier as prediction
+                        pred_indices = np.arange(mask_start, mask_end) - SEASONAL_PERIOD
+                        # Ensure indices are valid (>= 0)
+                        pred_indices = np.clip(pred_indices, 0, len(series) - 1)
+                        point_pred = np.nan_to_num(series[pred_indices], nan=0.0)
+                        # Calculate metrics (no samples for naive baseline)
+                        prob_metrics = calculate_all_metrics(truth, point_pred, None)
+                        fdd_metrics = calculate_fdd_metrics(truth, point_pred, None)
+                        metrics = {**prob_metrics, **fdd_metrics}
+                        results[model_name].append(metrics)
+                elif isinstance(model, MoiraiModule):
+                    # Mask the middle slice (35%-65%) for FDD
+                    preds = predict_multivariate(
+                        model,
+                        window,
+                        context_length=CONTEXT_LENGTH,
+                        prediction_length=0,
+                        weather_var_ids=WEATHER_VAR_IDS,
+                        target_var_ids=valid_targets,
+                        task_type="virtual_sensor",  # reuse same masking logic
+                        patch_size=PATCH_SIZE,
+                        num_samples=NUM_SAMPLES,
+                        device=device,
+                    )
+                    for var_id in valid_targets:
+                        if var_id not in preds:
+                            continue
+                        point_pred, samples = preds[var_id]
+                        truth = window[var_id, mask_start:mask_end]
+                        # Calculate both probabilistic metrics and FDD metrics
+                        prob_metrics = calculate_all_metrics(truth, point_pred, samples)
+                        fdd_metrics = calculate_fdd_metrics(truth, point_pred, samples)
+                        # Merge both
+                        metrics = {**prob_metrics, **fdd_metrics}
+                        results[model_name].append(metrics)
             except Exception as exc:
                 print(f"  Warning: FDD failed for {model_name} on sample {idx}: {exc}")
                 continue
@@ -1026,36 +1043,49 @@ def plot_task_samples(
         total_len = CONTEXT_LENGTH
         start_idx = find_best_window(target[var_id], CONTEXT_LENGTH, 0)
         window = target[:, start_idx : start_idx + total_len]
+        mask_start = int(total_len * 0.35)
+        mask_end = int(total_len * 0.65)
         preds_fdd: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Tuple[int, int, int]]] = {}
         for name, model in models.items():
-            if not isinstance(model, MoiraiModule):
-                continue
             try:
-                res = predict_multivariate(
-                    model,
-                    window,
-                    context_length=CONTEXT_LENGTH,
-                    prediction_length=0,
-                    weather_var_ids=WEATHER_VAR_IDS,
-                    target_var_ids=[var_id],
-                    task_type="virtual_sensor",  # reuse same masking logic
-                    patch_size=PATCH_SIZE,
-                    num_samples=NUM_SAMPLES,
-                    device=device,
-                )
-                if var_id not in res:
-                    continue
-                point_pred, samples = res[var_id]
-                mask_start = int(total_len * 0.35)
-                mask_end = int(total_len * 0.65)
-                truth = window[var_id, mask_start:mask_end]
-                preds_fdd[name] = (
-                    window[var_id, :total_len],  # full context (both sides visible)
-                    truth,
-                    point_pred,
-                    samples,
-                    (mask_start, mask_end, total_len),
-                )
+                if name == "Seasonal Naive":
+                    # Seasonal Naive: use values from SEASONAL_PERIOD steps earlier
+                    series = window[var_id]
+                    truth = series[mask_start:mask_end]
+                    pred_indices = np.arange(mask_start, mask_end) - SEASONAL_PERIOD
+                    pred_indices = np.clip(pred_indices, 0, len(series) - 1)
+                    point_pred = np.nan_to_num(series[pred_indices], nan=0.0)
+                    preds_fdd[name] = (
+                        window[var_id, :total_len],
+                        truth,
+                        point_pred,
+                        None,
+                        (mask_start, mask_end, total_len),
+                    )
+                elif isinstance(model, MoiraiModule):
+                    res = predict_multivariate(
+                        model,
+                        window,
+                        context_length=CONTEXT_LENGTH,
+                        prediction_length=0,
+                        weather_var_ids=WEATHER_VAR_IDS,
+                        target_var_ids=[var_id],
+                        task_type="virtual_sensor",  # reuse same masking logic
+                        patch_size=PATCH_SIZE,
+                        num_samples=NUM_SAMPLES,
+                        device=device,
+                    )
+                    if var_id not in res:
+                        continue
+                    point_pred, samples = res[var_id]
+                    truth = window[var_id, mask_start:mask_end]
+                    preds_fdd[name] = (
+                        window[var_id, :total_len],  # full context (both sides visible)
+                        truth,
+                        point_pred,
+                        samples,
+                        (mask_start, mask_end, total_len),
+                    )
             except Exception:
                 continue
         if preds_fdd:
@@ -1176,7 +1206,9 @@ def main():
     results["task1"] = task1
 
     print("  Task 2: FDD (mask middle 35%-65%)")
-    task2 = task2_fdd(moirai_models, test_hf, args.max_samples, device)
+    # Include Seasonal Naive baseline in Task 2
+    task2_models = {"Seasonal Naive": models["Seasonal Naive"], **moirai_models}
+    task2 = task2_fdd(task2_models, test_hf, args.max_samples, device)
     results["task2"] = task2
 
     output_dir = OUTPUT_DIR

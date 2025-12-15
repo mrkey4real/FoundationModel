@@ -1,12 +1,12 @@
 schema_version: "1.0_lite"
 building_id: "East"
-
-# 物理因果链精简版 (Total: 24 vars)
-# 0-1: Weather (输入)
-# 2-3: Power (系统响应)
-# 4-7: IDU System (中间状态)
-# 8-15: Zone Temps (最终输出 - 每个房间选1个代表性传感器)
-# 16-23: Solar Flux (外部干扰 - 每个房间选1个方向)
+# BuildingFM HVAC Super Schema Lite v1.0
+# Variable ID:
+    # 0-1: Weather 
+    # 2-3: Power 
+    # 4-7: IDU System 
+    # 8-15: Zone Temps 
+    # 16-23: Solar Flux 
 
 variables:
   # === Weather (2 vars) ===

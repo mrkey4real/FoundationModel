@@ -32,7 +32,7 @@ ACTIVE_SCHEMA = 'lite'
 # Patch Size: Independent configuration
 # - For lite (24 vars): Can use 16, 32, or 64
 # - For full (112 vars): Must use 128 due to MOIRAI's 512 token limit
-PATCH_SIZE = 32
+PATCH_SIZE = 128
 
 # Data Frequency
 DATA_FREQ = '15min'
